@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 
-from architect.planner.engine.state import (
+from forge.planner.engine.state import (
     PHASE_ORDER,
     PhaseState,
     PhaseStatus,
@@ -167,3 +167,29 @@ def test_new_fields_default_values():
     assert state.killed is False
     assert state.kill_reason == ""
     assert state.driver_pid == 0
+
+
+def test_preset_fields_round_trip():
+    state = PlannerState(
+        slug="preset-test",
+        preset="web-app",
+        preset_path="/path/to/presets/web-app",
+    )
+    d = state_to_dict(state)
+    assert d["preset"] == "web-app"
+    assert d["preset_path"] == "/path/to/presets/web-app"
+
+    restored = dict_to_state(d)
+    assert restored.preset == "web-app"
+    assert restored.preset_path == "/path/to/presets/web-app"
+
+
+def test_preset_fields_default_empty():
+    state = PlannerState()
+    assert state.preset == ""
+    assert state.preset_path == ""
+
+    d = state_to_dict(state)
+    restored = dict_to_state(d)
+    assert restored.preset == ""
+    assert restored.preset_path == ""

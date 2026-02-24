@@ -9,21 +9,21 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-from architect.executor.engine.utils import (
+from forge.executor.engine.utils import (
     repo_root, validate_package_name, transitive_dependents,
     session_prefix, find_active_session, SESSIONS_BASE, is_bazel_repo,
 )
 
 
 class TestRepoRoot(unittest.TestCase):
-    @patch("architect.executor.engine.utils.subprocess.run")
+    @patch("forge.executor.engine.utils.subprocess.run")
     def test_returns_git_root(self, mock_run):
         mock_run.return_value.stdout = "/home/user/repo\n"
         mock_run.return_value.returncode = 0
         result = repo_root()
         self.assertEqual(result, "/home/user/repo")
 
-    @patch("architect.executor.engine.utils.subprocess.run", side_effect=FileNotFoundError)
+    @patch("forge.executor.engine.utils.subprocess.run", side_effect=FileNotFoundError)
     def test_fallback_on_error(self, _):
         result = repo_root()
         self.assertEqual(result, ".")
@@ -34,7 +34,7 @@ class TestValidatePackageName(unittest.TestCase):
         valid = [
             "apps/webapp",
             "platform/ui",
-            "@hz/test-tools",
+            "@example/test-tools",
             "my_pkg.v2",
             "simple",
             "a/b/c/d",
@@ -99,25 +99,25 @@ class TestTransitiveDependents(unittest.TestCase):
 
 
 class TestSessionPrefix(unittest.TestCase):
-    @patch("architect.executor.engine.utils.subprocess.run")
+    @patch("forge.executor.engine.utils.subprocess.run")
     def test_extracts_ticket_from_branch(self, mock_run):
         mock_run.return_value.stdout = "dev/PROJ-1234-speed-change\n"
         result = session_prefix()
         self.assertEqual(result, "PROJ-1234")
 
-    @patch("architect.executor.engine.utils.subprocess.run")
+    @patch("forge.executor.engine.utils.subprocess.run")
     def test_extracts_ticket_with_prefix_only(self, mock_run):
         mock_run.return_value.stdout = "feature/ABC-123\n"
         result = session_prefix()
         self.assertEqual(result, "ABC-123")
 
-    @patch("architect.executor.engine.utils.subprocess.run")
+    @patch("forge.executor.engine.utils.subprocess.run")
     def test_no_ticket_pattern_uses_branch_name(self, mock_run):
         mock_run.return_value.stdout = "feature/my-branch\n"
         result = session_prefix()
         self.assertEqual(result, "feature-my-branch")
 
-    @patch("architect.executor.engine.utils.subprocess.run", side_effect=FileNotFoundError)
+    @patch("forge.executor.engine.utils.subprocess.run", side_effect=FileNotFoundError)
     def test_git_not_available(self, _):
         result = session_prefix()
         self.assertEqual(result, "unknown")
@@ -132,8 +132,8 @@ class TestFindActiveSession(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp)
 
-    @patch("architect.executor.engine.utils.SESSIONS_BASE")
-    @patch("architect.executor.engine.utils.session_prefix", return_value="PROJ-1234")
+    @patch("forge.executor.engine.utils.SESSIONS_BASE")
+    @patch("forge.executor.engine.utils.session_prefix", return_value="PROJ-1234")
     def test_finds_matching_session(self, _prefix, mock_base):
         mock_base.__class__ = Path
         mock_base.is_dir = lambda: True
@@ -142,7 +142,7 @@ class TestFindActiveSession(unittest.TestCase):
         session.mkdir()
         (session / "agent-state.json").write_text("{}")
 
-        with patch("architect.executor.engine.utils.SESSIONS_BASE", self.sessions_dir):
+        with patch("forge.executor.engine.utils.SESSIONS_BASE", self.sessions_dir):
             result = find_active_session()
         self.assertIsNotNone(result)
         self.assertEqual(result.name, "PROJ-1234_2026-02-21_192200Z")
@@ -154,8 +154,8 @@ class TestFindActiveSession(unittest.TestCase):
         session.mkdir()
         (session / "agent-state.json").write_text("{}")
 
-        with patch("architect.executor.engine.utils.SESSIONS_BASE", self.sessions_dir), \
-             patch("architect.executor.engine.utils.session_prefix", return_value="PROJ-1234"):
+        with patch("forge.executor.engine.utils.SESSIONS_BASE", self.sessions_dir), \
+             patch("forge.executor.engine.utils.session_prefix", return_value="PROJ-1234"):
             result = find_active_session()
         self.assertIsNone(result)
 
@@ -170,8 +170,8 @@ class TestFindActiveSession(unittest.TestCase):
         # Touch s2 to ensure it's newer
         os.utime(s2, None)
 
-        with patch("architect.executor.engine.utils.SESSIONS_BASE", self.sessions_dir), \
-             patch("architect.executor.engine.utils.session_prefix", return_value="PROJ-1234"):
+        with patch("forge.executor.engine.utils.SESSIONS_BASE", self.sessions_dir), \
+             patch("forge.executor.engine.utils.session_prefix", return_value="PROJ-1234"):
             result = find_active_session()
         self.assertEqual(result.name, "PROJ-1234_2026-02-21_200000Z")
 
@@ -180,8 +180,8 @@ class TestFindActiveSession(unittest.TestCase):
         session.mkdir()
         # No agent-state.json
 
-        with patch("architect.executor.engine.utils.SESSIONS_BASE", self.sessions_dir), \
-             patch("architect.executor.engine.utils.session_prefix", return_value="PROJ-1234"):
+        with patch("forge.executor.engine.utils.SESSIONS_BASE", self.sessions_dir), \
+             patch("forge.executor.engine.utils.session_prefix", return_value="PROJ-1234"):
             result = find_active_session()
         self.assertIsNone(result)
 
@@ -189,44 +189,44 @@ class TestFindActiveSession(unittest.TestCase):
 class TestSessionNameConsistency(unittest.TestCase):
     """Regression: _session_name must produce names that find_active_session can locate."""
 
-    @patch("architect.executor.commands.subprocess.run")
+    @patch("forge.executor.commands.subprocess.run")
     def test_ticket_branch_with_slug_uses_ticket(self, mock_run):
         """When branch has a ticket pattern, session name must use the ticket
         even if a planner slug is provided."""
-        from architect.executor.commands import _session_name
+        from forge.executor.commands import _session_name
         mock_run.return_value.stdout = "dev/PROJ-1234-speed-change\n"
 
         name = _session_name(slug="speed-change-shortcuts")
         self.assertTrue(name.startswith("PROJ-1234_"),
                         f"Expected session name to start with 'PROJ-1234_', got '{name}'")
 
-    @patch("architect.executor.commands.subprocess.run")
+    @patch("forge.executor.commands.subprocess.run")
     def test_no_ticket_branch_uses_branch_not_slug(self, mock_run):
         """When branch has no ticket pattern, branch name (not slug) is used
         so that find_active_session() can locate the session."""
-        from architect.executor.commands import _session_name
+        from forge.executor.commands import _session_name
         mock_run.return_value.stdout = "feature/my-branch\n"
 
         name = _session_name(slug="my-feature")
         self.assertTrue(name.startswith("feature-my-branch_"),
                         f"Expected session name to start with 'feature-my-branch_', got '{name}'")
 
-    @patch("architect.executor.commands.subprocess.run")
+    @patch("forge.executor.commands.subprocess.run")
     def test_no_ticket_no_slug_uses_branch(self, mock_run):
         """When no ticket and no slug, branch name should be used."""
-        from architect.executor.commands import _session_name
+        from forge.executor.commands import _session_name
         mock_run.return_value.stdout = "feature/my-branch\n"
 
         name = _session_name()
         self.assertTrue(name.startswith("feature-my-branch_"),
                         f"Expected session name to start with 'feature-my-branch_', got '{name}'")
 
-    @patch("architect.executor.commands.subprocess.run")
-    @patch("architect.executor.engine.utils.subprocess.run")
+    @patch("forge.executor.commands.subprocess.run")
+    @patch("forge.executor.engine.utils.subprocess.run")
     def test_session_name_matches_find_active_session(self, mock_utils_run, mock_cmd_run):
         """End-to-end: session created by _session_name should be findable
         by find_active_session when on the same branch."""
-        from architect.executor.commands import _session_name
+        from forge.executor.commands import _session_name
 
         # Both functions see the same branch
         branch = "dev/PROJ-1234-speed-change-v2\n"
@@ -243,7 +243,7 @@ class TestSessionNameConsistency(unittest.TestCase):
             session.mkdir()
             (session / "agent-state.json").write_text("{}")
 
-            with patch("architect.executor.engine.utils.SESSIONS_BASE", sessions_dir):
+            with patch("forge.executor.engine.utils.SESSIONS_BASE", sessions_dir):
                 result = find_active_session()
 
             self.assertIsNotNone(result,
