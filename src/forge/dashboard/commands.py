@@ -1,15 +1,15 @@
 # Copyright 2026. Dashboard CLI command.
 
 import os
-import signal
 import subprocess
 import sys
 import webbrowser
 from pathlib import Path
 
+from .server import DEFAULT_PORT
+
 DASHBOARD_DIR = Path(__file__).parent
 SERVER_SCRIPT = DASHBOARD_DIR / "server.py"
-DASHBOARD_HTML = DASHBOARD_DIR / "dashboard.html"
 
 
 def _find_running_server() -> int | None:
@@ -28,7 +28,7 @@ def _find_running_server() -> int | None:
 
 
 def cmd_dashboard(args) -> int:
-    port = getattr(args, "port", 8765)
+    port = getattr(args, "port", DEFAULT_PORT)
     no_browser = getattr(args, "no_browser", False)
 
     pid = _find_running_server()
@@ -46,10 +46,10 @@ def cmd_dashboard(args) -> int:
         print(f"Server started (pid {proc.pid})")
 
     if not no_browser:
-        url = DASHBOARD_HTML.as_uri()
+        url = f"http://localhost:{port}"
         print(f"Opening {url}")
         webbrowser.open(url)
 
     print(f"\nAPI: http://localhost:{port}/sessions")
-    print(f"Stop: pkill -f 'forge/dashboard/server.py'")
+    print("Stop: pkill -f 'forge/dashboard/server.py'")
     return 0
