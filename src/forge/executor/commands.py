@@ -389,7 +389,7 @@ def cmd_execute(args):
         def set_failed(s: PipelineState):
             s.steps[name].retries += 1
             s.steps[name].status = StepStatus.FAILED
-            s.steps[name].last_error = result.output[:500] if result.output else "Command failed"
+            s.steps[name].last_error = result.output[:5000] if result.output else "Command failed"
             s.steps[name].completed_at = _now_iso()
         _state_mgr().update(set_failed)
 

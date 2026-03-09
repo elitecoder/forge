@@ -7,36 +7,43 @@ Supports multiple concurrent sessions with planner-executor linking and deletion
 import json
 import os
 import shutil
-import glob
 from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from datetime import datetime
-from typing import Dict, List, Optional, Any
+from typing import Dict, Optional, Any
 from urllib.parse import urlparse, parse_qs
-import subprocess
 
+DEFAULT_PORT = 8765
 ARCHITECT_DIR = Path.home() / '.forge' / 'sessions'
 PLANNER_DIR = ARCHITECT_DIR / 'planner'
 EXECUTOR_DIR = ARCHITECT_DIR / 'executor'
 REGISTRY_FILE = ARCHITECT_DIR / 'registry.jsonl'
 
 class EnhancedSessionHandler(BaseHTTPRequestHandler):
+    STATIC_DIR = Path(__file__).parent
+
     def do_GET(self):
         """Handle GET requests for different endpoints."""
         parsed_path = urlparse(self.path)
 
-        if parsed_path.path == '/sessions':
+        if parsed_path.path in ('/', '/dashboard'):
+            self.serve_static('dashboard.html')
+        elif parsed_path.path == '/sessions':
             self.handle_sessions()
-        elif parsed_path.path.startswith('/session/'):
-            self.handle_session_detail()
-        elif parsed_path.path == '/project':
-            # Get project details (planner + linked executors)
-            self.handle_project_detail()
-        elif parsed_path.path == '/status':
-            # Legacy endpoint for backward compatibility
-            self.handle_legacy_status()
+        elif parsed_path.path == '/artifacts':
+            self.handle_artifacts()
         else:
             self.send_error(404, "Endpoint not found")
+
+    def serve_static(self, filename: str):
+        """Serve a static HTML file from the dashboard directory."""
+        file_path = self.STATIC_DIR / filename
+        if not file_path.exists():
+            self.send_error(404, f"{filename} not found")
+            return
+        self.send_response(200)
+        self.send_header('Content-type', 'text/html')
+        self.end_headers()
+        self.wfile.write(file_path.read_bytes())
 
     def do_DELETE(self):
         """Handle DELETE requests for session removal."""
@@ -67,40 +74,6 @@ class EnhancedSessionHandler(BaseHTTPRequestHandler):
             error_data = {'error': str(e)}
             self.wfile.write(json.dumps(error_data).encode())
 
-    def handle_project_detail(self):
-        """Return planner + all linked executors for a project."""
-        parsed_url = urlparse(self.path)
-        params = parse_qs(parsed_url.query)
-        planner_id = params.get('planner', [None])[0]
-
-        self.send_response(200)
-        self.send_header('Content-type', 'application/json')
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.end_headers()
-
-        try:
-            project_data = self.get_project_detail(planner_id)
-            self.wfile.write(json.dumps(project_data, indent=2).encode())
-        except Exception as e:
-            error_data = {'error': str(e)}
-            self.wfile.write(json.dumps(error_data).encode())
-
-    def handle_session_detail(self):
-        """Return detailed info for a specific session."""
-        session_id = self.path.split('/')[-1]
-
-        self.send_response(200)
-        self.send_header('Content-type', 'application/json')
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.end_headers()
-
-        try:
-            session_detail = self.get_session_detail(session_id)
-            self.wfile.write(json.dumps(session_detail, indent=2).encode())
-        except Exception as e:
-            error_data = {'error': str(e)}
-            self.wfile.write(json.dumps(error_data).encode())
-
     def handle_delete_session(self):
         """Delete a session directory."""
         session_id = self.path.split('/')[-1]
@@ -118,19 +91,172 @@ class EnhancedSessionHandler(BaseHTTPRequestHandler):
             error_data = {'error': str(e), 'success': False}
             self.wfile.write(json.dumps(error_data).encode())
 
-    def handle_legacy_status(self):
-        """Legacy endpoint - returns most recent session."""
-        self.send_response(200)
+    def handle_artifacts(self):
+        """Return artifact data for a session directory."""
+        parsed_url = urlparse(self.path)
+        params = parse_qs(parsed_url.query)
+        session_dir = params.get('session_dir', [None])[0]
+
+        if not session_dir:
+            self._json_response(400, {'error': 'session_dir required'})
+            return
+
+        d = Path(session_dir)
+        if not d.exists():
+            self._json_response(404, {'error': 'session dir not found'})
+            return
+
+        result = {}
+
+        # Code checklist
+        checklist = d / 'code-checklist.json'
+        if checklist.exists():
+            try:
+                data = json.loads(checklist.read_text())
+                items = data.get('checklist', [])
+                result['code_checklist'] = {
+                    'total': len(items),
+                    'done': sum(1 for i in items if i.get('status') == 'done'),
+                    'files_created': len(data.get('files_created', [])),
+                    'files_modified': len(data.get('files_modified', [])),
+                }
+            except Exception:
+                pass
+
+        # Code review verdict
+        verdict = d / 'code-review-verdict.json'
+        if verdict.exists():
+            try:
+                result['code_review'] = json.loads(verdict.read_text())
+            except Exception:
+                pass
+
+        # Code review retries
+        retries_dir = d / '_retries'
+        if retries_dir.exists():
+            retry_verdicts = []
+            for attempt_dir in sorted(retries_dir.iterdir()):
+                v = attempt_dir / 'code-review-verdict.json'
+                if v.exists():
+                    try:
+                        rv = json.loads(v.read_text())
+                        rv['attempt'] = attempt_dir.name
+                        retry_verdicts.append(rv)
+                    except Exception:
+                        pass
+            if retry_verdicts:
+                result['code_review_retries'] = retry_verdicts
+
+        # Code actions
+        code_actions = d / 'code-actions.json'
+        if code_actions.exists():
+            try:
+                data = json.loads(code_actions.read_text())
+                result['code_actions'] = {
+                    'outcome': data.get('outcome'),
+                    'files_read': len(data.get('files_read', [])),
+                    'files_written': len(data.get('files_written', [])),
+                    'commands_run': len(data.get('commands', [])),
+                    'errors': len(data.get('errors', [])),
+                }
+            except Exception:
+                pass
+
+        # Collect all step actions and checklists generically
+        step_actions = {}
+        step_checklists = {}
+        for f in d.iterdir():
+            if f.name.endswith('-actions.json'):
+                step_name = f.name.replace('-actions.json', '')
+                try:
+                    data = json.loads(f.read_text())
+                    step_actions[step_name] = {
+                        'outcome': data.get('outcome'),
+                        'files_read': len(data.get('files_read', [])),
+                        'files_written': len(data.get('files_written', [])),
+                        'commands_run': len(data.get('commands', [])),
+                        'errors': len(data.get('errors', [])),
+                    }
+                except Exception:
+                    pass
+            elif f.name.endswith('-checklist.json'):
+                step_name = f.name.replace('-checklist.json', '')
+                try:
+                    step_checklists[step_name] = json.loads(f.read_text())
+                except Exception:
+                    pass
+
+        if step_actions:
+            result['step_actions'] = step_actions
+        if step_checklists:
+            result['step_checklists'] = step_checklists
+
+        # Keep legacy keys for backward compatibility
+        if 'e2e' in step_actions:
+            result['e2e_actions'] = step_actions['e2e']
+        if 'e2e' in step_checklists:
+            result['e2e_checklist'] = step_checklists['e2e']
+        if 'lint' in step_actions:
+            result['lint_actions'] = step_actions['lint']
+
+        # PR URL
+        pr_url = d / 'pr-url.txt'
+        if pr_url.exists():
+            result['pr_url'] = pr_url.read_text().strip()
+
+        # Pipeline status
+        status_file = d / 'pipeline-status.md'
+        if status_file.exists():
+            result['pipeline_status_md'] = status_file.read_text()[:2000]
+
+        # Plan file path from agent-state.json
+        state_file = d / 'agent-state.json'
+        if state_file.exists():
+            try:
+                state = json.loads(state_file.read_text())
+                plan = state.get('plan_file', '')
+                result['plan_file'] = plan
+                if plan and Path(plan).exists():
+                    result['plan_summary'] = Path(plan).read_text()[:100000]
+            except Exception:
+                pass
+
+        # Checkpoints
+        cp_dir = d / 'checkpoints'
+        if cp_dir.exists():
+            checkpoints = {}
+            for f in sorted(cp_dir.iterdir()):
+                if f.suffix == '.passed':
+                    content = f.read_text()
+                    cp = {}
+                    for line in content.splitlines():
+                        if '=' in line:
+                            k, v = line.split('=', 1)
+                            cp[k.strip()] = v.strip()
+                    checkpoints[f.stem] = cp
+            result['checkpoints'] = checkpoints
+
+        # Events
+        events_file = d / 'events.jsonl'
+        if events_file.exists():
+            try:
+                events = []
+                for line in events_file.read_text().splitlines():
+                    if line.strip():
+                        events.append(json.loads(line))
+                result['events'] = events
+            except Exception:
+                pass
+
+        self._json_response(200, result)
+
+    def _json_response(self, code: int, data: dict):
+        """Send a JSON response with CORS headers."""
+        self.send_response(code)
         self.send_header('Content-type', 'application/json')
         self.send_header('Access-Control-Allow-Origin', '*')
         self.end_headers()
-
-        try:
-            status_data = self.get_legacy_status()
-            self.wfile.write(json.dumps(status_data, indent=2).encode())
-        except Exception as e:
-            error_data = {'error': str(e)}
-            self.wfile.write(json.dumps(error_data).encode())
+        self.wfile.write(json.dumps(data).encode())
 
     def delete_session(self, session_id: str) -> Dict[str, Any]:
         """Delete a session directory and return status."""
@@ -148,7 +274,7 @@ class EnhancedSessionHandler(BaseHTTPRequestHandler):
                     if pid:
                         try:
                             os.kill(pid, 15)  # SIGTERM
-                        except:
+                        except OSError:
                             pass
 
             shutil.rmtree(planner_path)
@@ -166,7 +292,7 @@ class EnhancedSessionHandler(BaseHTTPRequestHandler):
                     if pid:
                         try:
                             os.kill(pid, 15)  # SIGTERM
-                        except:
+                        except OSError:
                             pass
 
             shutil.rmtree(executor_path)
@@ -183,33 +309,6 @@ class EnhancedSessionHandler(BaseHTTPRequestHandler):
                 'success': False,
                 'message': f'Session {session_id} not found'
             }
-
-    def get_project_detail(self, planner_id: str) -> Dict[str, Any]:
-        """Get planner and all linked executors."""
-        project = {
-            'planner': None,
-            'executors': [],
-            'linked': False
-        }
-
-        # Get planner details
-        if planner_id:
-            planner_path = PLANNER_DIR / planner_id
-            if planner_path.exists():
-                project['planner'] = self.get_planner_detail(planner_path)
-
-                # Find linked executors
-                if EXECUTOR_DIR.exists():
-                    for exec_dir in EXECUTOR_DIR.glob('*'):
-                        exec_info = self.get_executor_info(exec_dir)
-                        if exec_info:
-                            plan_file = exec_info.get('plan_file', '')
-                            if planner_id in plan_file:
-                                exec_detail = self.get_executor_detail(exec_dir)
-                                project['executors'].append(exec_detail)
-                                project['linked'] = True
-
-        return project
 
     def get_all_sessions(self) -> Dict[str, Any]:
         """Get all sessions grouped by project."""
@@ -271,10 +370,17 @@ class EnhancedSessionHandler(BaseHTTPRequestHandler):
                         project['executors'].append(exec_info)
                         linked = True
 
-                        # Update overall status
+                        # Update overall status based on executor
                         if exec_info.get('status') == 'active':
                             project['overall_status'] = 'executing'
                             sessions['total_active'] += 1
+                        elif project['overall_status'] == 'inactive':
+                            # Planner done, executor exists but finished
+                            has_failed = any(
+                                s.get('status') == 'failed'
+                                for s in exec_info.get('steps', {}).values()
+                            )
+                            project['overall_status'] = 'failed' if has_failed else 'completed'
                         break
 
             if not linked:
@@ -356,21 +462,22 @@ class EnhancedSessionHandler(BaseHTTPRequestHandler):
         with open(state_file, 'r') as f:
             state = json.load(f)
 
-        # Determine if active
+        # Determine if active: check if driver process is still running
         is_active = False
         current_step = state.get('current_step')
-        if current_step:
+        pid = state.get('driver_pid', 0)
+        if pid:
+            try:
+                os.kill(pid, 0)  # Check if process exists
+                is_active = True
+            except OSError:
+                pass
+
+        # Fallback: check step status if no PID
+        if not is_active and current_step:
             step_status = state.get('steps', {}).get(current_step, {}).get('status')
             if step_status in ['in_progress', 'running']:
                 is_active = True
-
-        # Check if process is still running
-        pid = state.get('driver_pid', 0)
-        if pid and is_active:
-            try:
-                os.kill(pid, 0)  # Check if process exists
-            except OSError:
-                is_active = False
 
         return {
             'session_id': session_dir.name,
@@ -388,134 +495,20 @@ class EnhancedSessionHandler(BaseHTTPRequestHandler):
             'pid': pid
         }
 
-    def get_session_detail(self, session_id: str) -> Dict[str, Any]:
-        """Get detailed info for a specific session including activity logs."""
-        # Check planner sessions
-        planner_path = PLANNER_DIR / session_id
-        if planner_path.exists():
-            return self.get_planner_detail(planner_path)
-
-        # Check executor sessions
-        executor_path = EXECUTOR_DIR / session_id
-        if executor_path.exists():
-            return self.get_executor_detail(executor_path)
-
-        return {'error': f'Session {session_id} not found'}
-
-    def get_planner_detail(self, session_dir: Path) -> Dict[str, Any]:
-        """Get detailed planner session info."""
-        info = self.get_planner_info(session_dir)
-        if not info:
-            return {'error': 'Session state not found'}
-
-        # Add activity log
-        activity_file = session_dir / 'planner-activity.log'
-        if activity_file.exists():
-            with open(activity_file, 'r') as f:
-                lines = f.readlines()
-                info['recent_activity'] = [line.strip() for line in lines[-50:]]
-
-        # Add document info
-        documents = []
-        for doc in ['design-a.md', 'design-b.md', 'critique-a.md', 'critique-b.md',
-                   'refined-a.md', 'refined-b.md', 'final-plan.md']:
-            doc_path = session_dir / doc
-            if doc_path.exists():
-                size = doc_path.stat().st_size
-                documents.append({
-                    'name': doc,
-                    'exists': True,
-                    'size': f"{size / 1024:.1f}K"
-                })
-            else:
-                documents.append({
-                    'name': doc,
-                    'exists': False
-                })
-        info['documents'] = documents
-        info['session_type'] = 'planner'
-
-        return info
-
-    def get_executor_detail(self, session_dir: Path) -> Dict[str, Any]:
-        """Get detailed executor session info."""
-        info = self.get_executor_info(session_dir)
-        if not info:
-            return {'error': 'Session state not found'}
-
-        # Add activity log
-        activity_file = session_dir / 'pipeline-activity.log'
-        if activity_file.exists():
-            with open(activity_file, 'r') as f:
-                lines = f.readlines()
-                info['recent_activity'] = [line.strip() for line in lines[-50:]]
-
-        # Parse pipeline status if available
-        status_file = session_dir / 'pipeline-status.md'
-        if status_file.exists():
-            with open(status_file, 'r') as f:
-                content = f.read()
-                # Parse the table
-                phases = {}
-                for line in content.split('\n'):
-                    if line.startswith('|') and '|' in line[1:]:
-                        parts = [p.strip() for p in line.split('|')]
-                        if len(parts) >= 4 and parts[1] not in ['Step', '------', '']:
-                            step_name = parts[1]
-                            status = parts[2].lower() if parts[2] != '—' else 'pending'
-                            duration = parts[3] if parts[3] != '—' else None
-
-                            phases[step_name] = {
-                                'status': status,
-                                'duration': duration
-                            }
-                info['phases'] = phases
-
-        info['session_type'] = 'executor'
-        info['documents'] = []
-
-        return info
-
-    def get_legacy_status(self) -> Dict[str, Any]:
-        """Legacy method - returns most recent session."""
-        # Find most recent session
-        planner_sessions = sorted(PLANNER_DIR.glob('*'), key=os.path.getmtime, reverse=True) if PLANNER_DIR.exists() else []
-        executor_sessions = sorted(EXECUTOR_DIR.glob('*'), key=os.path.getmtime, reverse=True) if EXECUTOR_DIR.exists() else []
-
-        latest_planner = planner_sessions[0] if planner_sessions else None
-        latest_executor = executor_sessions[0] if executor_sessions else None
-
-        if latest_executor and latest_planner:
-            if os.path.getmtime(latest_executor) > os.path.getmtime(latest_planner):
-                return self.get_executor_detail(latest_executor)
-            else:
-                return self.get_planner_detail(latest_planner)
-        elif latest_executor:
-            return self.get_executor_detail(latest_executor)
-        elif latest_planner:
-            return self.get_planner_detail(latest_planner)
-        else:
-            return {'error': 'No active sessions found'}
-
     def log_message(self, format, *args):
         # Suppress default logging
         pass
 
-def run_server(port=8765):
+def run_server(port=DEFAULT_PORT):
     server_address = ('', port)
     httpd = HTTPServer(server_address, EnhancedSessionHandler)
-    print(f"🚀 Forge Enhanced Session Server running on http://localhost:{port}")
-    print(f"📊 Endpoints:")
-    print(f"   /sessions - All sessions overview")
-    print(f"   /session/<id> - Specific session detail")
-    print(f"   /project?planner=<id> - Project with linked sessions")
-    print(f"   DELETE /session/<id> - Delete session")
-    print(f"Press Ctrl+C to stop\n")
+    print(f"Forge Dashboard running on http://localhost:{port}")
+    print("Press Ctrl+C to stop\n")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
         print("\n\n👋 Server stopped")
 
 if __name__ == '__main__':
-    port = int(os.environ.get('DASHBOARD_PORT', '8765'))
+    port = int(os.environ.get('DASHBOARD_PORT', str(DEFAULT_PORT)))
     run_server(port)
