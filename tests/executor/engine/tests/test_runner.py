@@ -250,7 +250,7 @@ class TestChecklistSchemaSection:
 
         assert "code_review-checklist.json" in section
         assert "/tmp/session" in section
-        assert '"status": "done|skipped|blocked"' in section
+        assert '"status": "done|blocked"' in section
 
     def test_mentions_judge(self):
         section = _checklist_schema_section("visual_test", "/s")
@@ -389,8 +389,9 @@ class TestRunOnePackage:
         defaults.update(kwargs)
         return StepDefinition(**defaults)
 
+    @patch("forge.executor.engine.runner.is_bazel_repo", return_value=False)
     @patch("forge.executor.engine.runner.subprocess.run")
-    def test_successful_package_run(self, mock_run):
+    def test_successful_package_run(self, mock_run, mock_bazel):
         mock_run.return_value = MagicMock(returncode=0, stdout=b"OK\n", stderr=b"")
         step = self._make_step()
         state = _make_state(session_dir=self.session_dir, packages=["apps/web"])
@@ -402,8 +403,9 @@ class TestRunOnePackage:
         assert result.passed is True
         assert "OK" in result.output
 
+    @patch("forge.executor.engine.runner.is_bazel_repo", return_value=False)
     @patch("forge.executor.engine.runner.subprocess.run")
-    def test_failed_package_with_error_file(self, mock_run):
+    def test_failed_package_with_error_file(self, mock_run, mock_bazel):
         mock_run.return_value = MagicMock(returncode=1, stdout=b"", stderr=b"FAIL\n")
         step = self._make_step(error_file="test-errors-{{PACKAGE_SLUG}}.txt")
         state = _make_state(session_dir=self.session_dir, packages=["apps/web"])
@@ -417,9 +419,10 @@ class TestRunOnePackage:
         assert Path(result.error_file).is_file()
         assert "FAIL" in Path(result.error_file).read_text()
 
+    @patch("forge.executor.engine.runner.is_bazel_repo", return_value=False)
     @patch("forge.executor.engine.runner.repo_root", return_value="/fake/repo")
     @patch("forge.executor.engine.runner._changed_files", return_value="(mocked)")
-    def test_timeout_during_package_run(self, mock_changed, mock_root):
+    def test_timeout_during_package_run(self, mock_changed, mock_root, mock_bazel):
         def fake_run(*args, **kwargs):
             raise subprocess.TimeoutExpired("cmd", 600)
 

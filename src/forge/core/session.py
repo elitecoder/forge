@@ -113,6 +113,31 @@ def generate_slug(text: str, fallback: str = "session",
     return fallback
 
 
+def find_running_session(base: Path, state_filename: str) -> Path | None:
+    """Find a session with a live driver process (driver_pid > 0 and process exists)."""
+    if not base.is_dir():
+        return None
+    for d in sorted(base.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+        if not d.is_dir():
+            continue
+        state_file = d / state_filename
+        if not state_file.is_file():
+            continue
+        try:
+            data = json.loads(state_file.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        pid = data.get("driver_pid", 0)
+        if pid <= 0:
+            continue
+        try:
+            os.kill(pid, 0)
+            return d
+        except OSError:
+            continue
+    return None
+
+
 def find_active_session(base: Path, state_filename: str, prefix: str = "") -> Path | None:
     if not base.is_dir():
         return None

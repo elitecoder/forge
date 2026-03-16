@@ -56,7 +56,7 @@ class TestParseStreamJson:
             "message": {"content": [{"type": "text", "text": "Hello world"}]},
         })
         result = self.provider._parse_stream_json(msg)
-        assert result == ["Hello world"]
+        assert result == [("Hello world", True)]
 
     def test_assistant_tool_use_bash(self):
         msg = json.dumps({
@@ -68,7 +68,7 @@ class TestParseStreamJson:
             }]},
         })
         result = self.provider._parse_stream_json(msg)
-        assert result == ["$ ls -la"]
+        assert result == [("$ ls -la", False)]
 
     def test_assistant_tool_use_read(self):
         msg = json.dumps({
@@ -80,7 +80,7 @@ class TestParseStreamJson:
             }]},
         })
         result = self.provider._parse_stream_json(msg)
-        assert result == ["[Read] /tmp/test.py"]
+        assert result == [("[Read] /tmp/test.py", False)]
 
     def test_tool_result(self):
         msg = json.dumps({
@@ -88,26 +88,26 @@ class TestParseStreamJson:
             "tool_result": {"content": "output text"},
         })
         result = self.provider._parse_stream_json(msg)
-        assert result == ["output text"]
+        assert result == [("output text", False)]
 
     def test_result_type(self):
         msg = json.dumps({"type": "result", "result": "Final answer"})
         result = self.provider._parse_stream_json(msg)
-        assert result == ["Final answer"]
+        assert result == [("Final answer", True)]
 
     def test_error_type(self):
         msg = json.dumps({"type": "error", "error": "something failed"})
         result = self.provider._parse_stream_json(msg)
-        assert result == ["[error] something failed"]
+        assert result == [("[error] something failed", True)]
 
     def test_system_type(self):
         msg = json.dumps({"type": "system", "message": "init done", "subtype": "init"})
         result = self.provider._parse_stream_json(msg)
-        assert result == ["[system:init] init done"]
+        assert result == [("[system:init] init done", False)]
 
     def test_invalid_json(self):
         result = self.provider._parse_stream_json("not json")
-        assert result == ["not json"]
+        assert result == [("not json", False)]
 
     def test_empty_string(self):
         result = self.provider._parse_stream_json("")

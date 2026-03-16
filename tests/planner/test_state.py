@@ -18,13 +18,11 @@ def test_state_round_trip():
     state = PlannerState(
         slug="test-session",
         session_dir="/tmp/test",
-        fast_mode=True,
+        session_hash="abc123",
+        pipeline_mode="full",
         problem_statement="Add auth",
-        core_tension="security vs UX",
-        constraint_a="OAuth2",
-        constraint_b="magic links",
         phases={
-            "recon": PhaseState(status=PhaseStatus.COMPLETE, retries=0),
+            "gatekeeper": PhaseState(status=PhaseStatus.COMPLETE, retries=0),
             "architects": PhaseState(status=PhaseStatus.IN_PROGRESS, retries=1),
         },
         created_at="2026-01-01T00:00:00Z",
@@ -33,13 +31,14 @@ def test_state_round_trip():
     d = state_to_dict(state)
     restored = dict_to_state(d)
     assert restored.slug == "test-session"
-    assert restored.fast_mode is True
-    assert restored.phases["recon"].status == PhaseStatus.COMPLETE
+    assert restored.session_hash == "abc123"
+    assert restored.pipeline_mode == "full"
+    assert restored.phases["gatekeeper"].status == PhaseStatus.COMPLETE
     assert restored.phases["architects"].retries == 1
 
 
 def test_state_round_trip_json(tmp_path):
-    state = PlannerState(slug="json-test", phases={"recon": PhaseState(status=PhaseStatus.PENDING)})
+    state = PlannerState(slug="json-test", phases={"gatekeeper": PhaseState(status=PhaseStatus.PENDING)})
     d = state_to_dict(state)
     path = tmp_path / "state.json"
     path.write_text(json.dumps(d))
@@ -49,22 +48,22 @@ def test_state_round_trip_json(tmp_path):
 
 def test_next_runnable_empty():
     state = PlannerState()
-    assert state.next_runnable() == "recon"
+    assert state.next_runnable() == "gatekeeper"
 
 
 def test_next_runnable_after_complete():
     state = PlannerState(phases={
-        "recon": PhaseState(status=PhaseStatus.COMPLETE),
+        "gatekeeper": PhaseState(status=PhaseStatus.COMPLETE),
     })
-    assert state.next_runnable() == "architects"
+    assert state.next_runnable() == "router"
 
 
 def test_next_runnable_in_progress():
     state = PlannerState(phases={
-        "recon": PhaseState(status=PhaseStatus.COMPLETE),
-        "architects": PhaseState(status=PhaseStatus.IN_PROGRESS),
+        "gatekeeper": PhaseState(status=PhaseStatus.COMPLETE),
+        "router": PhaseState(status=PhaseStatus.IN_PROGRESS),
     })
-    assert state.next_runnable() == "architects"
+    assert state.next_runnable() == "router"
 
 
 def test_next_runnable_all_done():
@@ -75,16 +74,16 @@ def test_next_runnable_all_done():
 
 def test_next_runnable_failed_retryable():
     state = PlannerState(phases={
-        "recon": PhaseState(status=PhaseStatus.COMPLETE),
-        "architects": PhaseState(status=PhaseStatus.FAILED, retries=1),
+        "gatekeeper": PhaseState(status=PhaseStatus.COMPLETE),
+        "router": PhaseState(status=PhaseStatus.FAILED, retries=1),
     })
-    assert state.next_runnable() == "architects"
+    assert state.next_runnable() == "router"
 
 
 def test_dict_to_state_invalid_status():
-    d = {"phases": {"recon": {"status": "bogus"}}}
+    d = {"phases": {"gatekeeper": {"status": "bogus"}}}
     state = dict_to_state(d)
-    assert state.phases["recon"].status == PhaseStatus.FAILED
+    assert state.phases["gatekeeper"].status == PhaseStatus.FAILED
 
 
 def test_state_manager_save_load(tmp_path):
@@ -107,18 +106,18 @@ def test_state_manager_update(tmp_path):
     mgr.save(PlannerState(slug="update-test"))
 
     def mutate(s: PlannerState):
-        s.phases["recon"] = PhaseState(status=PhaseStatus.COMPLETE)
+        s.phases["gatekeeper"] = PhaseState(status=PhaseStatus.COMPLETE)
 
     updated = mgr.update(mutate)
-    assert updated.phases["recon"].status == PhaseStatus.COMPLETE
+    assert updated.phases["gatekeeper"].status == PhaseStatus.COMPLETE
 
     reloaded = mgr.load()
-    assert reloaded.phases["recon"].status == PhaseStatus.COMPLETE
+    assert reloaded.phases["gatekeeper"].status == PhaseStatus.COMPLETE
 
 
 def test_state_to_dict_optional_fields():
     state = PlannerState(phases={
-        "recon": PhaseState(
+        "gatekeeper": PhaseState(
             status=PhaseStatus.COMPLETE,
             started_at="2026-01-01T00:00:00Z",
             completed_at="2026-01-01T00:01:00Z",
@@ -126,17 +125,17 @@ def test_state_to_dict_optional_fields():
         ),
     })
     d = state_to_dict(state)
-    phase = d["phases"]["recon"]
+    phase = d["phases"]["gatekeeper"]
     assert phase["started_at"] == "2026-01-01T00:00:00Z"
     assert phase["last_error"] == "some error"
 
 
 def test_state_to_dict_omits_empty_optional():
     state = PlannerState(phases={
-        "recon": PhaseState(status=PhaseStatus.PENDING),
+        "gatekeeper": PhaseState(status=PhaseStatus.PENDING),
     })
     d = state_to_dict(state)
-    phase = d["phases"]["recon"]
+    phase = d["phases"]["gatekeeper"]
     assert "started_at" not in phase
     assert "last_error" not in phase
 
