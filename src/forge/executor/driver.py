@@ -38,6 +38,25 @@ MAX_DEV_SERVER_PRECHECK_FAILURES = 2
 
 _fast_mode = False
 
+# Executor agent identities — map step/role to agent definition names in skins/claude-code/agents/
+_PLUGIN_PREFIX = "forge"
+
+_EXECUTOR_AGENTS: dict[str, str] = {
+    "code":              "executor-code",
+    "fix":               "executor-fix",
+    "visual_test":       "executor-visual-test",
+    "code_review":       "executor-code-review",
+    "code_review_fix":   "executor-code-review-fix",
+    "judge":             "executor-judge",
+    "visual_judge":      "executor-visual-judge",
+    "triage":            "executor-triage",
+}
+
+
+def _executor_agent_name(key: str) -> str:
+    name = _EXECUTOR_AGENTS.get(key, "")
+    return f"{_PLUGIN_PREFIX}:{name}" if name else ""
+
 
 def _resolve_model(model: str) -> str:
     return "haiku" if _fast_mode else model
@@ -483,8 +502,11 @@ def dispatch_ai_step(step_name: str, phase: str, cwd: str,
     worktree_before = _snapshot_worktree(cwd)
     base = step_name if phase == "run" else f"{step_name}_{phase}"
     transcript_step = f"{base}_attempt{attempt}" if attempt > 0 else base
+    agent = _executor_agent_name(step_name) if phase == "run" else _executor_agent_name("fix")
+    extra_env = {"FORGE_MODE": "executor", "FORGE_AGENT": step_name}
     runner = AgentRunner(_session_dir, transcript_step, _activity_log_path)
-    runner.run(prompt, model, max_turns, cwd, timeout_s=timeout_ms // 1000)
+    runner.run(prompt, model, max_turns, cwd, timeout_s=timeout_ms // 1000,
+               agent_name=agent, extra_env=extra_env)
 
     violations = _enforce_file_allowlist(step_name, cwd, worktree_before)
     if violations:
@@ -575,7 +597,8 @@ def dispatch_with_judge(step_name: str, phase: str, cwd: str,
         verdict = spawn_judge(step_name, session_dir, criteria, checklist, diff,
                               _resolve_model(judge_config.model),
                               activity_log_path=_activity_log_path or "",
-                              attempt=attempt)
+                              attempt=attempt,
+                              agent_name=_executor_agent_name("judge"))
         passed_count = len([i for i in verdict.items if i.get("verdict") == "pass"])
         emit(session_dir, EventType.JUDGE_VERDICT, "executor", step=step_name,
              passed=verdict.passed, pass_count=passed_count, total=len(verdict.items))
@@ -637,6 +660,7 @@ def _handle_command_step(name: str, retries: int, cwd: str) -> tuple[str, bool]:
             failed_packages=failed_pkgs or None,
             model=model, max_turns=0, timeout_s=3600,
             attempt=attempt,
+            agent_name=_executor_agent_name("fix"),
         )
 
         if outcome.passed:
@@ -672,6 +696,7 @@ def _handle_code_step(cwd: str, session_dir: str) -> tuple[str, bool]:
         state=state, preset=preset, cwd=cwd,
         session_dir=session_dir, activity_log_path=activity_log,
         model=model, max_turns=0, timeout_s=3600,
+        agent_name=_executor_agent_name("code"),
     )
 
     if outcome.detected_packages:
@@ -957,7 +982,8 @@ def run_code_review(cwd: str, session_dir: str) -> bool:
         judge_verdict = spawn_judge("code_review", session_dir, findings, checklist, diff,
                                     _resolve_model(judge_config.model),
                                     activity_log_path=_activity_log_path or "",
-                                    attempt=attempt)
+                                    attempt=attempt,
+                                    agent_name=_executor_agent_name("judge"))
         passed_count = len([i for i in judge_verdict.items if i.get("verdict") == "pass"])
         log_info("code_review", f"judge: {passed_count}/{len(judge_verdict.items)} items passed")
 

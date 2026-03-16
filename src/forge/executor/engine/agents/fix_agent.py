@@ -136,6 +136,7 @@ def run(
     timeout_s: int = 3600,
     agent_command: str | None = None,
     attempt: int = 0,
+    agent_name: str = "",
 ) -> FixAgentOutcome:
     """Run the fix step: generate prompt, spawn agent, re-verify, report."""
     prompt = generate_prompt(step, state, preset, failed_packages)
@@ -154,6 +155,8 @@ def run(
         max_turns=max_turns,
         cwd=cwd,
         timeout_s=timeout_s,
+        agent_name=agent_name,
+        extra_env={"FORGE_MODE": "executor", "FORGE_AGENT": "fix"},
     )
 
     # Re-run the verify command deterministically
