@@ -27,12 +27,16 @@ def _load_rules() -> dict:
     return _rules_cache
 
 
-def validate_phase(session_dir: str, phase: str) -> EvidenceResult:
+def validate_phase(session_dir: str, phase: str, pipeline_mode: str = "") -> EvidenceResult:
     """Validate that a phase produced well-formed output files."""
     rules = _load_rules()
     phase_rules = rules.get(phase)
     if not phase_rules:
         return EvidenceResult(True, f"No evidence rules for phase '{phase}'")
+
+    # Lite mode: only validate "a" variant files (single agent per phase)
+    if pipeline_mode == "lite":
+        phase_rules = [r for r in phase_rules if "-b." not in r.get("file_glob", "")]
 
     checked = 0
     for rule in phase_rules:

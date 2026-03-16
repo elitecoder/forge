@@ -5,13 +5,15 @@
 
 import json
 import os
+import re
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from .registry import JudgeConfig
+from .registry import JudgeConfig, Preset
 from .state import PipelineState
 
 
@@ -23,17 +25,22 @@ class JudgeVerdict:
 
 
 def load_criteria(session_dir: str, step_name: str, config: JudgeConfig,
-                  state: PipelineState) -> list[dict]:
-    """Load criteria items based on criteria_source."""
+                  state: PipelineState, preset: Preset | None = None) -> list[dict]:
+    """Load criteria items based on criteria_source, plus preset conventions."""
     if config.criteria_source == "plan":
-        return _load_plan_criteria(state)
-    if config.criteria_source == "findings":
-        return _load_findings_criteria(session_dir)
-    if config.criteria_source == "visual_test_plan":
-        return _load_visual_test_criteria(session_dir)
-    if config.criteria_source == "changed_files":
-        return _load_changed_files_criteria()
-    return [{"id": "step-complete", "criteria": f"Complete the {step_name} step"}]
+        items = _load_plan_criteria(state)
+    elif config.criteria_source == "findings":
+        items = _load_findings_criteria(session_dir)
+    elif config.criteria_source == "visual_test_plan":
+        items = _load_visual_test_criteria(session_dir)
+    elif config.criteria_source == "changed_files":
+        items = _load_changed_files_criteria()
+    else:
+        items = [{"id": "step-complete", "criteria": f"Complete the {step_name} step"}]
+
+    if preset:
+        items.extend(_load_conventions_criteria(preset))
+    return items
 
 
 def _load_plan_criteria(state: PipelineState) -> list[dict]:
@@ -114,6 +121,35 @@ def _load_visual_test_criteria(session_dir: str) -> list[dict]:
     return items or [{"id": "vt-1", "criteria": "Execute all visual test scenarios"}]
 
 
+def _load_conventions_criteria(preset: Preset) -> list[dict]:
+    """Load coding conventions from preset references/code.md as judge criteria.
+
+    Each rule/requirement in code.md becomes a criteria item the judge
+    evaluates against the diff. Rules are identified by **bold sentences**
+    that contain actionable keywords (always, must, never, required, every).
+    """
+    if not preset.preset_dir:
+        return []
+    conventions_file = Path(preset.preset_dir) / "references" / "code.md"
+    if not conventions_file.is_file():
+        return []
+
+    actionable = re.compile(r"\b(always|must|never|required|every|do not|ensure)\b", re.IGNORECASE)
+
+    items = []
+    idx = 0
+    for line in conventions_file.read_text().splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("**"):
+            continue
+        text = re.sub(r"\*\*", "", stripped).strip()
+        if actionable.search(text) or text.lower().startswith("rule:"):
+            idx += 1
+            items.append({"id": f"convention-{idx}", "criteria": text})
+
+    return items
+
+
 def _load_changed_files_criteria() -> list[dict]:
     """Load changed files as criteria items."""
     try:
@@ -161,7 +197,8 @@ Output ONLY this JSON (no markdown fences, no extra text):
 {{
   "items": [
     {{"id": "item-id", "verdict": "pass", "reason": "explanation"}},
-    {{"id": "item-id", "verdict": "fail", "reason": "explanation"}}
+    {{"id": "item-id", "verdict": "fail", "reason": "explanation"}},
+    {{"id": "item-id", "verdict": "skip", "reason": "explanation"}}
   ]
 }}
 
@@ -169,6 +206,8 @@ Rules:
 - A "skipped" or "blocked" status in the self-report is a FAIL unless the reason is genuinely valid
 - If the diff doesn't confirm the agent's evidence claim, it's a FAIL
 - Be strict. Partial fixes are FAILs.
+- If a criteria item is clearly out of scope for this step (e.g., test execution scenarios, visual verification, Jira references, planning items), use verdict "skip" — NOT "fail"
+- Only use "fail" for criteria that the agent SHOULD have addressed but didn't
 - Every criteria item must have a verdict entry"""
 
 
@@ -197,11 +236,16 @@ def _save_judge_transcript(path: str, stdout: str, stderr: str = "") -> None:
         pass
 
 
+MAX_JUDGE_RETRIES = 2
+JUDGE_RETRY_DELAY_S = 5
+
+
 def spawn_judge(step_name: str, session_dir: str, criteria: list[dict],
                 checklist: dict, diff: str, model: str = "opus",
                 activity_log_path: str = "",
-                attempt: int = 0) -> JudgeVerdict:
-    """Spawn a judge agent and parse its verdict."""
+                attempt: int = 0,
+                agent_name: str = "") -> JudgeVerdict:
+    """Spawn a judge agent and parse its verdict. Retries on timeout."""
     prompt = build_judge_prompt(step_name, criteria, checklist, diff)
     suffix = f"_attempt{attempt}" if attempt > 0 else ""
     transcript_path = os.path.join(session_dir, f"{step_name}_judge{suffix}-transcript.log")
@@ -211,30 +255,47 @@ def spawn_judge(step_name: str, session_dir: str, criteria: list[dict],
     env = os.environ.copy()
     env.pop("CLAUDECODE", None)
 
-    try:
-        result = subprocess.run(
-            ["claude", "-p", "--dangerously-skip-permissions", "--model", model, "--max-turns", "20"],
-            input=prompt, capture_output=True, text=True,
-            timeout=120, env=env,
-        )
-        _save_judge_transcript(transcript_path, result.stdout, result.stderr)
-        return _parse_judge_output(result.stdout, criteria)
-    except subprocess.TimeoutExpired:
-        _save_judge_transcript(transcript_path, "", "Judge timed out")
-        _judge_log(activity_log_path, step_name, "judge timed out")
-        return JudgeVerdict(
-            passed=False,
-            items=[{"id": c["id"], "verdict": "fail", "reason": "Judge timed out"} for c in criteria],
-            summary="Judge agent timed out",
-        )
-    except FileNotFoundError:
-        _save_judge_transcript(transcript_path, "", "Claude CLI not found")
-        _judge_log(activity_log_path, step_name, "judge CLI not found")
-        return JudgeVerdict(
-            passed=False,
-            items=[{"id": c["id"], "verdict": "fail", "reason": "Claude CLI not found"} for c in criteria],
-            summary="Claude CLI not available for judge",
-        )
+    cmd = ["claude", "-p", "--dangerously-skip-permissions", "--model", model, "--max-turns", "20"]
+    if agent_name:
+        cmd += ["--agent", agent_name]
+
+    for judge_try in range(1, MAX_JUDGE_RETRIES + 1):
+        try:
+            result = subprocess.run(
+                cmd,
+                input=prompt, capture_output=True, text=True,
+                timeout=120, env=env,
+            )
+            _save_judge_transcript(transcript_path, result.stdout, result.stderr)
+            return _parse_judge_output(result.stdout, criteria)
+        except subprocess.TimeoutExpired:
+            if judge_try < MAX_JUDGE_RETRIES:
+                _judge_log(activity_log_path, step_name,
+                           f"judge timed out, retrying ({judge_try}/{MAX_JUDGE_RETRIES})")
+                time.sleep(JUDGE_RETRY_DELAY_S)
+                continue
+            _save_judge_transcript(transcript_path, "", "Judge timed out")
+            _judge_log(activity_log_path, step_name, "judge timed out (retries exhausted)")
+            return JudgeVerdict(
+                passed=False,
+                items=[{"id": c["id"], "verdict": "fail", "reason": "Judge timed out"} for c in criteria],
+                summary="Judge agent timed out",
+            )
+        except FileNotFoundError:
+            _save_judge_transcript(transcript_path, "", "Claude CLI not found")
+            _judge_log(activity_log_path, step_name, "judge CLI not found")
+            return JudgeVerdict(
+                passed=False,
+                items=[{"id": c["id"], "verdict": "fail", "reason": "Claude CLI not found"} for c in criteria],
+                summary="Claude CLI not available for judge",
+            )
+
+    # Shouldn't reach here, but be safe
+    return JudgeVerdict(
+        passed=False,
+        items=[{"id": c["id"], "verdict": "fail", "reason": "Judge retries exhausted"} for c in criteria],
+        summary="Judge retries exhausted",
+    )
 
 
 def _parse_judge_output(output: str, criteria: list[dict]) -> JudgeVerdict:
@@ -265,7 +326,7 @@ def _parse_judge_output(output: str, criteria: list[dict]) -> JudgeVerdict:
     try:
         data = json.loads(text)
         items = data.get("items", [])
-        failed = [i for i in items if i.get("verdict") != "pass"]
+        failed = [i for i in items if i.get("verdict") not in ("pass", "skip")]
         return JudgeVerdict(
             passed=len(failed) == 0 and len(items) > 0,
             items=items,

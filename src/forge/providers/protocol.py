@@ -16,7 +16,9 @@ class Provider(Protocol):
     def run_agent(self, prompt: str, model: str, max_turns: int, cwd: str,
                   timeout_s: int = 3600, step_name: str = "",
                   session_dir: str = "", activity_log_path: str = "",
-                  system_prompt: str = "", allowed_tools: str = "") -> AgentResult: ...
+                  system_prompt: str = "", allowed_tools: str = "",
+                  agent_name: str = "", echo_stdout: bool = False,
+                  extra_env: dict[str, str] | None = None) -> AgentResult: ...
 
     def run_judge(self, prompt: str, model: str = "fast",
                   max_turns: int = 20, timeout_s: int = 120) -> str: ...

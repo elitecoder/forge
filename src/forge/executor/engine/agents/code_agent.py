@@ -5,13 +5,14 @@ import json
 import re
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from forge.core.runner import AgentRunner, AgentResult
 from ..runner import _judge_feedback_section, build_context, PIPELINE_CLI
 from ..state import PipelineState, StepState
-from ..registry import Preset
+from ..registry import Preset, StepDefinition
 from ..templates import render
 from ..utils import is_bazel_repo
 
@@ -263,6 +264,116 @@ def _verify_build(state: PipelineState, preset: Preset, cwd: str, session_dir: s
     return {"passed": False, "reason": f"Build failed: {error_summary}"}
 
 
+# ── Transient failure detection ───────────────────────────────────────────
+
+_TRANSIENT_PATTERNS = [
+    "server terminated abruptly",
+    "socket closed",
+    "connection refused",
+    "failed to connect",
+    "grpc_status:14",
+    "unavailable",
+    "build timed out",
+    "build execution failed",
+]
+
+
+def _is_transient_failure(reason: str) -> bool:
+    """Check if a build failure is transient infrastructure, not a code error."""
+    lower = reason.lower()
+    return any(p in lower for p in _TRANSIENT_PATTERNS)
+
+
+MAX_BUILD_FIX_ATTEMPTS = 2
+BUILD_RETRY_DELAY_S = 10
+
+
+def _build_fix_step(state: PipelineState, preset: Preset, cwd: str, session_dir: str) -> StepDefinition:
+    """Create a synthetic StepDefinition for fix_agent to fix build errors."""
+    ctx = build_context(state, preset)
+    cmd_template = preset.build_command
+    if preset.bazel_build_command and is_bazel_repo():
+        cmd_template = preset.bazel_build_command
+    build_cmd = render(cmd_template, ctx)
+
+    return StepDefinition(
+        name="code_build_fix",
+        step_type="command",
+        run_command=build_cmd,
+        error_file="build-errors.txt",
+        fix_hints="Fix the build/compile errors. Only modify files you need to fix.",
+        timeout=300,
+    )
+
+
+def _log_activity(activity_log_path: str, msg: str) -> None:
+    """Append a timestamped entry to the activity log."""
+    if not activity_log_path:
+        return
+    try:
+        from datetime import datetime
+        with open(activity_log_path, "a") as f:
+            f.write(f"[{datetime.now().strftime('%H:%M:%S')}] code  {msg}\n")
+    except OSError:
+        pass
+
+
+def _build_code_prior_context(session_dir: str) -> str | None:
+    """Build prior context for code agent from prior executor session. No LLM needed."""
+    prior_dir = Path(session_dir) / "prior-executor"
+    if not prior_dir.is_dir() or not any(prior_dir.iterdir()):
+        return None
+
+    # Find the most recent prior session
+    prior_sessions = sorted(
+        (p for p in prior_dir.iterdir() if p.is_dir()),
+        key=lambda p: p.stat().st_mtime, reverse=True,
+    )
+    if not prior_sessions:
+        return None
+    prior = prior_sessions[0]
+
+    sections = [
+        "## Prior Execution — Augment, Do Not Reinvent\n\n"
+        "A prior execution session exists. Read the artifacts below to understand "
+        "what was already tried. Build on that work — fix what failed, keep what worked.\n"
+    ]
+
+    # Code checklist from prior run
+    checklist = prior / "code-checklist.json"
+    if checklist.is_file():
+        sections.append(f"### Prior Code Checklist\nPath: `{checklist}`\nRead to see what was implemented and verified.\n")
+
+    # Judge verdict
+    for verdict in sorted(prior.glob("*judge-verdict*")):
+        sections.append(f"### Prior Judge Verdict\nPath: `{verdict}`\nRead to see what passed and what failed verification.\n")
+
+    # Build errors
+    for errors in sorted(prior.glob("*build-error*")):
+        sections.append(f"### Prior Build Errors\nPath: `{errors}`\nRead to avoid repeating build failures.\n")
+
+    # Triage reports (already analyzed by triage agent)
+    for triage in sorted(prior.rglob("triage*")):
+        if triage.is_file():
+            sections.append(f"### Prior Triage Analysis\nPath: `{triage}`\nRead for root cause analysis of prior failure.\n")
+
+    # Code diff from prior run
+    diff_file = prior / "code-diff.patch"
+    if diff_file.is_file():
+        sections.append(f"### Prior Code Changes\nPath: `{diff_file}`\nRead to see exact changes made in the prior attempt.\n")
+
+    # List remaining artifacts for discovery
+    all_artifacts = sorted(
+        f for f in prior.rglob("*")
+        if f.is_file() and f.suffix in {".md", ".json", ".txt", ".patch"}
+    )
+    if all_artifacts:
+        listing = "\n".join(f"- `{f}`" for f in all_artifacts[:30])
+        sections.append(f"### All Prior Artifacts\n{listing}\n")
+
+    return "\n\n".join(sections)
+
+
 def _generate_checklist(cwd: str) -> dict:
     """Generate a checklist from git diff summary."""
     diff_stat = subprocess.run(
@@ -317,9 +428,14 @@ def run(
     max_turns: int = 0,
     timeout_s: int = 3600,
     agent_command: str | None = None,
+    agent_name: str = "",
 ) -> CodeAgentOutcome:
     """Run the code step: generate prompt, spawn agent, verify, report."""
-    prompt = generate_prompt(state, preset)
+    base_prompt = generate_prompt(state, preset)
+
+    # Cross-run: prepend prior session context if available
+    prior_context = _build_code_prior_context(session_dir)
+    prompt = f"{prior_context}\n\n---\n\n{base_prompt}" if prior_context else base_prompt
 
     runner = AgentRunner(
         session_dir=session_dir,
@@ -334,6 +450,8 @@ def run(
         max_turns=max_turns,
         cwd=cwd,
         timeout_s=timeout_s,
+        agent_name=agent_name,
+        extra_env={"FORGE_MODE": "executor", "FORGE_AGENT": "code"},
     )
 
     # Verify outcome deterministically
@@ -341,8 +459,39 @@ def run(
         _report_fail(session_dir, "No code changes produced")
         return CodeAgentOutcome(passed=False, reason="No code changes produced")
 
-    # Verify build succeeds before reporting pass
+    # Build verify + fix loop: retry infra flakes, use fix_agent for code errors
+    from .fix_agent import run as run_fix_agent
+
     build_status = _verify_build(state, preset, cwd, session_dir)
+
+    for fix_attempt in range(MAX_BUILD_FIX_ATTEMPTS):
+        if build_status["passed"]:
+            break
+
+        if _is_transient_failure(build_status["reason"]):
+            _log_activity(activity_log_path,
+                          f"build: transient failure, retrying in {BUILD_RETRY_DELAY_S}s "
+                          f"({fix_attempt + 1}/{MAX_BUILD_FIX_ATTEMPTS})")
+            time.sleep(BUILD_RETRY_DELAY_S)
+            build_status = _verify_build(state, preset, cwd, session_dir)
+            continue
+
+        # Code error — use fix_agent
+        _log_activity(activity_log_path,
+                      f"build: code error, spawning fix agent "
+                      f"({fix_attempt + 1}/{MAX_BUILD_FIX_ATTEMPTS})")
+        step_def = _build_fix_step(state, preset, cwd, session_dir)
+        run_fix_agent(
+            step=step_def, state=state, preset=preset,
+            cwd=cwd, session_dir=session_dir,
+            activity_log_path=activity_log_path,
+            model=model, max_turns=0, timeout_s=timeout_s,
+            agent_command=agent_command, attempt=fix_attempt,
+            agent_name=agent_name,
+        )
+        # Re-verify build after fix agent
+        build_status = _verify_build(state, preset, cwd, session_dir)
+
     if not build_status["passed"]:
         _report_fail(session_dir, build_status["reason"])
         return CodeAgentOutcome(passed=False, reason=build_status["reason"])

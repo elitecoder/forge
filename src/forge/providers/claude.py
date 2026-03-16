@@ -20,7 +20,7 @@ _EVENT_PATTERNS = [
     (re.compile(r"\[(?:Edit|Write)\]\s*(.+)", re.IGNORECASE), "write"),
     (re.compile(r"(?:Running|Bash|Executing|run):?\s*[`'\"]?(.+?)(?:[`'\"]?\s*$)", re.IGNORECASE), "bash"),
     (re.compile(r"^\$\s+(.+)$"), "bash"),
-    (re.compile(r"(?:Error|FAILED|error:)\s*(.+)", re.IGNORECASE), "error"),
+    (re.compile(r"^(?:\[error\]|Error:|ERROR:)\s*(.+)"), "error"),
 ]
 
 NARRATION_SUFFIX = (
@@ -67,7 +67,9 @@ class ClaudeProvider:
     def run_agent(self, prompt: str, model: str, max_turns: int, cwd: str,
                   timeout_s: int = 3600, step_name: str = "",
                   session_dir: str = "", activity_log_path: str = "",
-                  system_prompt: str = "", allowed_tools: str = "") -> AgentResult:
+                  system_prompt: str = "", allowed_tools: str = "",
+                  agent_name: str = "", echo_stdout: bool = False,
+                  extra_env: dict[str, str] | None = None) -> AgentResult:
         transcript_path = str(
             Path(session_dir) / f"{step_name}-transcript.log"
         ) if session_dir and step_name else ""
@@ -81,17 +83,24 @@ class ClaudeProvider:
             "--dangerously-skip-permissions",
             "--verbose",
             "--output-format", "stream-json",
-            "--model", model,
         ]
         plugin_dir = os.environ.get("FORGE_PLUGIN_DIR", "")
         if plugin_dir:
             cmd += ["--plugin-dir", plugin_dir]
+        if agent_name:
+            cmd += ["--agent", agent_name]
+        if model:
+            cmd += ["--model", model]
         if max_turns > 0:
             cmd += ["--max-turns", str(max_turns)]
         if system_prompt:
             cmd += ["--system-prompt", system_prompt]
         if allowed_tools:
             cmd += ["--allowedTools", allowed_tools]
+
+        env = _child_env()
+        if extra_env:
+            env.update(extra_env)
 
         try:
             proc = subprocess.Popen(
@@ -100,11 +109,15 @@ class ClaudeProvider:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 cwd=cwd,
-                env=_child_env(),
+                env=env,
                 text=True,
             )
-        except FileNotFoundError:
-            self._log_activity(activity_log_path, step_name, f"ERROR: '{self.agent_command}' not found")
+        except FileNotFoundError as fnf:
+            if cwd and not os.path.isdir(cwd):
+                msg = f"ERROR: working directory does not exist: {cwd}"
+            else:
+                msg = f"ERROR: '{self.agent_command}' not found — is it installed and on PATH?"
+            self._log_activity(activity_log_path, step_name, msg)
             return AgentResult(
                 exit_code=127,
                 stdout="",
@@ -143,13 +156,15 @@ class ClaudeProvider:
                 _touch_activity()
                 if raw_log_path:
                     self._write_log(raw_log_path, raw)
-                for readable in self._parse_stream_json(raw):
+                for readable, is_agent_text in self._parse_stream_json(raw):
                     if len(lines) < _MAX_INMEMORY_LINES:
                         lines.append(readable)
                     if transcript_path:
                         self._write_log(transcript_path, readable)
                     if activity_log_path:
                         self._check_key_event(activity_log_path, step_name, readable)
+                    if echo_stdout and is_agent_text and readable.strip():
+                        print(readable, flush=True)
 
         reader_thread = threading.Thread(target=_reader, daemon=True)
         reader_thread.start()
@@ -201,30 +216,35 @@ class ClaudeProvider:
             return f"{namespace}:{agent_type}"
         return agent_type
 
-    def _parse_stream_json(self, raw: str) -> list[str]:
+    def _parse_stream_json(self, raw: str) -> list[tuple[str, bool]]:
+        """Parse a stream-json line. Returns list of (text, is_agent_text) tuples.
+
+        is_agent_text=True for the agent's own prose/reasoning (echo to terminal).
+        is_agent_text=False for tool calls, tool results, and system messages (log only).
+        """
         try:
             msg = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
-            return [raw] if raw.strip() else []
+            return [(raw, False)] if raw.strip() else []
 
         if not isinstance(msg, dict):
-            return [raw] if raw.strip() else []
+            return [(raw, False)] if raw.strip() else []
 
-        out: list[str] = []
+        out: list[tuple[str, bool]] = []
         msg_type = msg.get("type", "")
 
         if msg_type == "assistant":
             for block in msg.get("message", {}).get("content", []):
                 if block.get("type") == "text" and block.get("text", "").strip():
-                    out.append(block["text"])
+                    out.append((block["text"], True))
                 elif block.get("type") == "tool_use":
                     name = block.get("name", "?")
                     inp = block.get("input", {})
                     if name == "Bash":
-                        out.append(f"$ {inp.get('command', '')}")
+                        out.append((f"$ {inp.get('command', '')}", False))
                     else:
                         detail = inp.get("file_path", inp.get("pattern", inp.get("path", "")))
-                        out.append(f"[{name}] {detail}")
+                        out.append((f"[{name}] {detail}", False))
 
         elif msg_type == "tool_result":
             content = None
@@ -237,30 +257,30 @@ class ClaudeProvider:
                     content = msg["tool_result"].get("output", "")
                 else:
                     content = msg.get("output", "")
-            out.extend(_extract_content_text(content))
+            out.extend((t, False) for t in _extract_content_text(content))
 
         elif msg_type == "result":
             r = msg.get("result", "")
             if isinstance(r, str) and r.strip():
-                out.append(r)
+                out.append((r, True))
 
         elif msg_type == "system":
             text = msg.get("message", msg.get("text", ""))
             subtype = msg.get("subtype", "")
             if isinstance(text, str) and text.strip():
-                out.append(f"[system:{subtype}] {text}" if subtype else f"[system] {text}")
+                out.append((f"[system:{subtype}] {text}" if subtype else f"[system] {text}", False))
 
         elif msg_type == "error":
             error = msg.get("error", msg.get("message", ""))
             if isinstance(error, dict):
                 error = error.get("message", str(error))
             if error:
-                out.append(f"[error] {error}")
+                out.append((f"[error] {error}", True))
 
         elif msg_type == "user":
             for item in msg.get("message", {}).get("content", []):
                 if isinstance(item, dict):
-                    out.extend(_extract_content_text(item.get("content", "")))
+                    out.extend((t, False) for t in _extract_content_text(item.get("content", "")))
 
         return out
 

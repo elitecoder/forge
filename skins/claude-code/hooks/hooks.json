@@ -1,10 +1,20 @@
 {
-  "description": "Architect pipeline hooks: lint-on-edit and build verification on stop",
+  "description": "Forge pipeline hooks: output file guard (post-write), judge verdict validation, lint-on-edit, and build verification on stop",
   "hooks": {
     "PostToolUse": [
       {
         "matcher": "Edit|Write",
         "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/guard-output-file.sh",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/validate-judge-verdict.sh",
+            "timeout": 5
+          },
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/scripts/lint-on-edit.sh",

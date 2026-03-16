@@ -5,6 +5,15 @@
 
 set -euo pipefail
 
+# Only run for executor agents that edit code (code, fix, code-review-fix)
+if [ "${FORGE_MODE:-}" != "executor" ]; then
+  exit 0
+fi
+case "${FORGE_AGENT:-}" in
+  code|fix|code-review-fix) ;;
+  *) exit 0 ;;
+esac
+
 INPUT=$(cat)
 
 # Note: we intentionally do NOT check stop_hook_active here.

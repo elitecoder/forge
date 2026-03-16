@@ -19,12 +19,14 @@ class AgentRunner:
         self._provider = ClaudeProvider(agent_command=agent_command or "claude")
 
     def run(self, prompt: str, model: str, max_turns: int, cwd: str,
-            timeout_s: int = 3600) -> AgentResult:
+            timeout_s: int = 3600, agent_name: str = "",
+            extra_env: dict[str, str] | None = None) -> AgentResult:
         return self._provider.run_agent(
             prompt=prompt, model=model, max_turns=max_turns, cwd=cwd,
             timeout_s=timeout_s, step_name=self.step_name,
             session_dir=self.session_dir,
             activity_log_path=self.activity_log_path,
+            agent_name=agent_name, extra_env=extra_env,
         )
 
 

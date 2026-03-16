@@ -16,6 +16,7 @@ from forge.core.session import (
     SESSIONS_BASE as _CORE_SESSIONS_BASE,
     create_session,
     find_active_session as _core_find_session,
+    find_running_session,
     generate_slug,
     list_sessions as _core_list_sessions,
     cleanup_sessions as _core_cleanup_sessions,
@@ -33,18 +34,15 @@ MAX_RETRIES = 2
 
 def resolve_skill_dir(skill_name: str, preset_path: str) -> Path | None:
     """Resolve skill dir: user override > bundled in preset > env fallback."""
-    # 1. User override (~/.claude/skills/)
     user_dir = Path.home() / ".claude" / "skills" / skill_name
     if (user_dir / "SKILL.md").is_file():
         return user_dir
 
-    # 2. Bundled in preset
     if preset_path:
         bundled = Path(preset_path) / "bundled-skills" / skill_name
         if (bundled / "SKILL.md").is_file():
             return bundled
 
-    # 3. Env var fallback
     env_base = os.environ.get("FORGE_SKILLS_BASE")
     if env_base:
         candidate = Path(env_base) / skill_name
@@ -53,62 +51,15 @@ def resolve_skill_dir(skill_name: str, preset_path: str) -> Path | None:
 
     return None
 
-# ── Model resolution ────────────────────────────────────────────────────────
 
-PHASE_MODELS = {
-    "recon":       {"default": "sonnet", "fast": "sonnet"},
-    "architects":  {"default": "opus",   "fast": "sonnet"},
-    "critics":     {"default": "opus",   "fast": "sonnet"},
-    "refiners":    {"default": "sonnet", "fast": "sonnet"},
-    "judge":       {"default": "opus",   "fast": "sonnet"},
-    "enrichment":  {"default": "sonnet", "fast": "sonnet"},
-}
-
-PHASE_MODEL_FALLBACKS = {
-    "architects": "sonnet",
-    "critics": "sonnet",
-    "judge": "sonnet",
-}
-
-# ── Turn limits ────────────────────────────────────────────────────────────
-
-PHASE_MAX_TURNS = {
-    "recon": 200,
-    "architects": 200,
-    "critics": 200,
-    "refiners": 200,
-    "judge": 200,
-    "enrichment": 200,
-}
-
-# ── Agent definitions per phase ─────────────────────────────────────────────
-
-PHASE_AGENTS = {
-    "recon": [
-        {"name": "recon", "template": "recon.md", "output": "codebase-brief.md"},
-    ],
-    "architects": [
-        {"name": "architect-a", "agent_type": "planner-architect-topdown",
-         "output": "design-a.md", "id": "a"},
-        {"name": "architect-b", "agent_type": "planner-architect-bottomup",
-         "output": "design-b.md", "id": "b"},
-    ],
-    "critics": [
-        {"name": "critic-a", "agent_type": "planner-critic",
-         "output": "critique-a.md", "id": "a"},
-        {"name": "critic-b", "agent_type": "planner-critic",
-         "output": "critique-b.md", "id": "b"},
-    ],
-    "refiners": [
-        {"name": "refiner-a", "agent_type": "planner-refiner",
-         "output": "refined-a.md", "id": "a"},
-        {"name": "refiner-b", "agent_type": "planner-refiner",
-         "output": "refined-b.md", "id": "b"},
-    ],
-    "judge": [
-        {"name": "judge", "agent_type": "planner-judge", "output": "final-plan.md"},
-    ],
-}
+def _load_planner_conventions(preset_path: str) -> str:
+    """Load preset-specific planner conventions from references/planner.md if present."""
+    if not preset_path:
+        return ""
+    conventions_file = Path(preset_path) / "references" / "planner.md"
+    if conventions_file.is_file():
+        return f"\n## Planning Conventions\n\n{conventions_file.read_text()}\n"
+    return ""
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
@@ -125,16 +76,13 @@ def _log_activity(session_dir: str, message: str) -> None:
     _core_log(_activity_log(session_dir), "", message)
 
 
-def _resolve_model(phase: str, fast_mode: bool) -> str:
-    profile = "fast" if fast_mode else "default"
-    return PHASE_MODELS.get(phase, {}).get(profile, "sonnet")
-
-
-def _get_fallback_model(phase: str) -> str | None:
-    return PHASE_MODEL_FALLBACKS.get(phase)
+def _resolve_model(phase: str) -> str:
+    from forge.planner.driver import PHASE_MODELS
+    return PHASE_MODELS.get(phase, {}).get("default", "sonnet")
 
 
 def _resolve_max_turns(phase: str) -> int:
+    from forge.planner.driver import PHASE_MAX_TURNS
     return PHASE_MAX_TURNS.get(phase, 15)
 
 
@@ -146,100 +94,7 @@ def _read_template(template_name: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def _substitute_prompt(template: str, state: PlannerState, agent: dict) -> str:
-    design_id = agent.get("id", "")
-    subs = {
-        "{{SESSION_DIR}}": state.session_dir,
-        "{{PROBLEM_STATEMENT}}": state.problem_statement,
-    }
-    if design_id == "a":
-        subs.update({
-            "{{CONSTRAINT}}": state.constraint_a,
-            "{{DESIGN_FILE}}": "design-a.md",
-            "{{CRITIQUE_FILE}}": "critique-a.md",
-            "{{REFINED_FILE}}": "refined-a.md",
-            "{{DESIGN_ID}}": "a",
-        })
-    elif design_id == "b":
-        subs.update({
-            "{{CONSTRAINT}}": state.constraint_b,
-            "{{DESIGN_FILE}}": "design-b.md",
-            "{{CRITIQUE_FILE}}": "critique-b.md",
-            "{{REFINED_FILE}}": "refined-b.md",
-            "{{DESIGN_ID}}": "b",
-        })
-
-    result = template
-    for key, val in subs.items():
-        result = result.replace(key, val)
-    return result
-
-
-# ── Context builders for specialized agents ─────────────────────────────────
-
-def _build_architect_context(state: PlannerState, agent_def: dict) -> str:
-    design_id = agent_def["id"]
-    constraint = state.constraint_a if design_id == "a" else state.constraint_b
-    design_file = f"design-{design_id}.md"
-    return f"""## Context
-
-- **Session directory**: {state.session_dir}
-- **Problem statement**: {state.problem_statement}
-- **Your constraint**: {constraint}
-- **Codebase brief**: {state.session_dir}/codebase-brief.md
-- **Write design to**: {state.session_dir}/{design_file}"""
-
-
-def _build_critic_context(state: PlannerState, agent_def: dict) -> str:
-    design_id = agent_def["id"]
-    design_file = f"design-{design_id}.md"
-    critique_file = f"critique-{design_id}.md"
-    return f"""## Context
-
-- **Session directory**: {state.session_dir}
-- **Design file**: {state.session_dir}/{design_file}
-- **Codebase brief**: {state.session_dir}/codebase-brief.md
-- **Write critique to**: {state.session_dir}/{critique_file}"""
-
-
-def _build_refiner_context(state: PlannerState, agent_def: dict) -> str:
-    design_id = agent_def["id"]
-    design_file = f"design-{design_id}.md"
-    critique_file = f"critique-{design_id}.md"
-    refined_file = f"refined-{design_id}.md"
-    return f"""## Context
-
-- **Session directory**: {state.session_dir}
-- **Design file**: {state.session_dir}/{design_file}
-- **Critique file**: {state.session_dir}/{critique_file}
-- **Codebase brief**: {state.session_dir}/codebase-brief.md
-- **Write refined design to**: {state.session_dir}/{refined_file}"""
-
-
-def _build_judge_context(state: PlannerState, agent_def: dict) -> str:
-    return f"""## Context
-
-- **Session directory**: {state.session_dir}
-- **Problem statement**: {state.problem_statement}
-- **Original design A**: {state.session_dir}/design-a.md
-- **Original design B**: {state.session_dir}/design-b.md
-- **Refined design A (revisions)**: {state.session_dir}/refined-a.md
-- **Refined design B (revisions)**: {state.session_dir}/refined-b.md
-- **Codebase brief**: {state.session_dir}/codebase-brief.md
-- **Write final plan to**: {state.session_dir}/final-plan.md"""
-
-
-_CONTEXT_BUILDERS = {
-    "planner-architect-topdown": _build_architect_context,
-    "planner-architect-bottomup": _build_architect_context,
-    "planner-critic": _build_critic_context,
-    "planner-refiner": _build_refiner_context,
-    "planner-judge": _build_judge_context,
-}
-
-
 def _load_enrichment_plugins(preset_path: str) -> list[dict]:
-    """Load enrichment plugins from the preset manifest."""
     if not preset_path:
         return []
     manifest = Path(preset_path) / "manifest.json"
@@ -283,7 +138,6 @@ def cmd_init(args):
         session_dir=session_dir,
         preset=preset_name,
         preset_path=preset_path,
-        fast_mode=args.fast,
         phases=phases,
         created_at=now_iso(),
         updated_at=now_iso(),
@@ -292,16 +146,11 @@ def cmd_init(args):
     mgr = StateManager(_state_file(session_dir))
     mgr.save(state)
 
-    _log_activity(session_dir, f"Session initialized: {slug} (fast={args.fast}, preset={preset_name or 'none'})")
+    _log_activity(session_dir, f"Session initialized: {slug} (preset={preset_name or 'none'})")
 
-    mode = "fast" if args.fast else "default"
-    print(f"Session initialized: {slug} ({mode} mode)")
+    print(f"Session initialized: {slug}")
     if preset_name:
         print(f"  Preset: {preset_name}")
-    print(f"  Architects: {_resolve_model('architects', args.fast)}")
-    print(f"  Critics: {_resolve_model('critics', args.fast)}")
-    print(f"  Refiners: {_resolve_model('refiners', args.fast)}")
-    print(f"  Judge: {_resolve_model('judge', args.fast)}")
     print(f"Session directory: {session_dir}")
     print(session_dir)
 
@@ -312,20 +161,11 @@ def cmd_set_context(args):
     def mutate(s: PlannerState):
         if args.problem:
             s.problem_statement = args.problem
-        if args.tension:
-            s.core_tension = args.tension
-        if args.constraint_a:
-            s.constraint_a = args.constraint_a
-        if args.constraint_b:
-            s.constraint_b = args.constraint_b
 
     state = mgr.update(mutate)
     _log_activity(state.session_dir, "Problem context set")
     print("Context updated:")
-    print(f"  Problem: {state.problem_statement[:80]}...")
-    print(f"  Tension: {state.core_tension}")
-    print(f"  Constraint A: {state.constraint_a[:60]}")
-    print(f"  Constraint B: {state.constraint_b[:60]}")
+    print(f"  Problem: {state.problem_statement[:80]}")
 
 
 def cmd_status(args):
@@ -357,8 +197,7 @@ def cmd_dispatch(args):
         print(f"ERROR: Unknown phase: {phase}", file=sys.stderr)
         sys.exit(1)
 
-    model = args.model if hasattr(args, 'model') and args.model else _resolve_model(phase, state.fast_mode)
-    fallback_model = _get_fallback_model(phase)
+    model = args.model if hasattr(args, 'model') and args.model else _resolve_model(phase)
     max_turns = _resolve_max_turns(phase)
 
     if phase == "enrichment":
@@ -370,34 +209,20 @@ def cmd_dispatch(args):
         print(json.dumps({"phase": "enrichment", "agents": agents}, indent=2))
         return
 
+    from forge.planner.driver import PHASE_AGENTS
     agent_defs = PHASE_AGENTS.get(phase, [])
     agents = []
     for agent_def in agent_defs:
-        agent_type = agent_def.get("agent_type")
-
-        if agent_type:
-            builder = _CONTEXT_BUILDERS[agent_type]
-            prompt = builder(state, agent_def)
-        else:
-            template = _read_template(agent_def["template"])
-            prompt = _substitute_prompt(template, state, agent_def)
-            agent_type = "general-purpose"
-
-        # Provider layer handles namespacing — no prefix needed
-        prefixed_type = agent_type
+        agent_type = agent_def.get("agent_type", "general-purpose")
         agents.append({
             "name": agent_def["name"],
             "model": model,
-            "subagent_type": prefixed_type,
-            "prompt": prompt,
+            "subagent_type": agent_type,
             "max_turns": max_turns,
             "output_file": agent_def["output"],
         })
 
-    result = {"phase": phase, "agents": agents}
-    if fallback_model:
-        result["fallback_model"] = fallback_model
-    print(json.dumps(result, indent=2))
+    print(json.dumps({"phase": phase, "agents": agents}, indent=2))
 
 
 def _dispatch_enrichment(state: PlannerState, max_turns: int) -> list[dict]:
@@ -410,14 +235,15 @@ def _dispatch_enrichment(state: PlannerState, max_turns: int) -> list[dict]:
         if skill_dir is None:
             continue
 
-        plugin_model = "sonnet" if state.fast_mode else plugin.get("model", "sonnet")
+        plugin_model = plugin.get("model", "sonnet")
         output_suffix = plugin.get("output_suffix", skill_name)
 
         template = _read_template("enrichment.md")
-        prompt = _substitute_prompt(template, state, {"id": "", "output": f"{output_suffix}.md"})
+        prompt = template.replace("{{SESSION_DIR}}", state.session_dir)
+        prompt = prompt.replace("{{PROBLEM_STATEMENT}}", state.problem_statement)
         prompt = prompt.replace("{{SKILL_NAME}}", skill_name)
-        prompt = prompt.replace("{{SKILL_DIR}}", str(skill_dir))
         prompt = prompt.replace("{{OUTPUT_SUFFIX}}", output_suffix)
+        prompt = prompt.replace("{{SKILL_DIR}}", str(skill_dir))
 
         agents.append({
             "name": f"enrich-{skill_name}",
@@ -454,7 +280,7 @@ def cmd_pass(args):
         print(f"ERROR: Unknown phase: {phase}", file=sys.stderr)
         sys.exit(1)
 
-    result = validate_phase(state.session_dir, phase)
+    result = validate_phase(state.session_dir, phase, state.pipeline_mode)
     if not result.passed:
         print(f"ERROR: Evidence validation failed for '{phase}': {result.message}", file=sys.stderr)
         sys.exit(1)
@@ -550,12 +376,12 @@ def cmd_sessions(args):
 def cmd_complete(args):
     _, state = _require_session()
 
-    required_phases = ["recon", "architects", "critics", "refiners", "judge"]
+    required_phases = ["gatekeeper", "architects", "critics", "refiners", "judge"]
     incomplete_phases = []
 
     for phase in required_phases:
         ps = state.phases.get(phase, PhaseState())
-        if ps.status != PhaseStatus.COMPLETE:
+        if ps.status not in TERMINAL_STATUSES:
             incomplete_phases.append(phase)
 
     if incomplete_phases:
@@ -602,10 +428,19 @@ def cmd_drive(args):
     from forge.providers.claude import ClaudeProvider
 
     if args.resume:
-        sd = _find_active_session()
-        if sd is None:
-            print("ERROR: No active planner session to resume.", file=sys.stderr)
-            sys.exit(1)
+        if args.session:
+            sd = Path(args.session)
+            if not sd.is_dir():
+                print(f"ERROR: Session directory does not exist: {sd}", file=sys.stderr)
+                sys.exit(1)
+            if not (sd / ".planner-state.json").is_file():
+                print(f"ERROR: '{sd}' is not a valid planner session (no .planner-state.json found).", file=sys.stderr)
+                sys.exit(1)
+        else:
+            sd = _find_active_session()
+            if sd is None:
+                print("ERROR: No active planner session to resume.", file=sys.stderr)
+                sys.exit(1)
         session_dir = str(sd)
         mgr = StateManager(_state_file(session_dir))
         state = mgr.load()
@@ -615,11 +450,13 @@ def cmd_drive(args):
             s.kill_reason = ""
         mgr.update(unflag)
 
+        auto_approve = getattr(args, 'auto_approve', False)
         provider = ClaudeProvider()
         repo_dir = state.repo_dir or os.getcwd()
         driver = PlannerDriver(
             provider, session_dir, repo_dir=repo_dir,
             workers=args.workers,
+            auto_approve=auto_approve,
         )
         driver.state_manager = mgr
 
@@ -635,18 +472,36 @@ def cmd_drive(args):
                 if phase is None:
                     break
                 driver._dispatch_phase(phase, st)
+
+                if phase == "gatekeeper":
+                    st = driver.state_manager.load()
+                    gk_ps = st.phases.get("gatekeeper")
+                    if gk_ps and gk_ps.status == PhaseStatus.COMPLETE:
+                        if not auto_approve and driver._verdict_blocks():
+                            continue
+                        driver._apply_complexity_routing()
+
+                if phase == "refiners":
+                    st = driver.state_manager.load()
+                    rs = st.phases.get("refiners")
+                    if rs and rs.status == PhaseStatus.COMPLETE and st.pipeline_mode == "lite":
+                        driver._promote_refined_to_final()
         finally:
             driver._clear_driver_pid()
         print(f"Session: {session_dir}")
         return
 
+    running = find_running_session(SESSIONS_BASE, ".planner-state.json")
+    if running:
+        print(f"ERROR: A planner is already running: {running}", file=sys.stderr)
+        print("  Use --resume to resume it, or kill it first with: forge plan kill", file=sys.stderr)
+        sys.exit(1)
+
     if not args.problem:
         print("ERROR: --problem is required (or use --resume)", file=sys.stderr)
         sys.exit(1)
 
-    slug = args.slug or generate_slug(args.problem, fallback="plan")
-    session = create_session("planner", slug=slug)
-    session_dir = str(session)
+    problem = args.problem
     repo_dir = args.repo or os.getcwd()
 
     preset_name = getattr(args, "preset", "") or ""
@@ -654,24 +509,76 @@ def cmd_drive(args):
     if preset_name:
         preset_path = str(resolve_preset_dir(preset_name))
 
+    slug = args.slug or generate_slug(problem, fallback="plan")
+    session = create_session("planner", slug=slug)
+    session_dir = str(session)
+
     provider = ClaudeProvider()
     driver = PlannerDriver(
         provider, session_dir, repo_dir=repo_dir,
         workers=args.workers,
         preset=preset_name, preset_path=preset_path,
+        auto_approve=getattr(args, 'auto_approve', False),
     )
-    result = driver.run(
-        args.problem, fast=args.fast,
-        tension=args.tension or "",
-        constraint_a=args.constraint_a or "",
-        constraint_b=args.constraint_b or "",
-    )
+    result = driver.run(problem,
+                        force=getattr(args, 'force', False),
+                        clean=getattr(args, 'clean', False),
+                        lite=getattr(args, 'lite', False))
     if result is None:
-        print("ERROR: Planner did not produce a final plan.", file=sys.stderr)
+        print(f"ERROR: Planner did not produce a final plan.", file=sys.stderr)
         print(f"Session: {session_dir}")
         sys.exit(1)
+
     print(f"Plan: {result}")
     print(f"Session: {session_dir}")
+
+
+def cmd_approve(args):
+    """Approve assumptions and unblock the planner pipeline."""
+    if args.session:
+        sd = Path(args.session)
+        if not sd.is_dir():
+            print(f"ERROR: Session directory does not exist: {sd}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        sd = _find_active_session()
+        if sd is None:
+            print("ERROR: No active planner session.", file=sys.stderr)
+            sys.exit(1)
+
+    session_dir = str(sd)
+    mgr = StateManager(_state_file(session_dir))
+    state = mgr.load()
+
+    if not state.killed or state.kill_reason != "spec_review_required":
+        print("ERROR: Pipeline is not blocked on assumptions.", file=sys.stderr)
+        sys.exit(1)
+
+    if args.answers:
+        answers_path = Path(args.answers)
+        if not answers_path.is_file():
+            print(f"ERROR: Answers file not found: {args.answers}", file=sys.stderr)
+            sys.exit(1)
+
+        gaps_path = Path(session_dir) / "spec-gaps.md"
+        answers_content = answers_path.read_text()
+
+        with open(gaps_path, "a") as f:
+            f.write("\n\n## Human-Provided Answers\n\n")
+            f.write(answers_content)
+            f.write("\n")
+
+        _log_activity(session_dir, f"Human answers appended from {args.answers}")
+        print(f"Appended answers to {gaps_path}")
+
+    def mutate(s: PlannerState) -> None:
+        s.killed = False
+        s.kill_reason = ""
+    mgr.update(mutate)
+
+    _log_activity(session_dir, "Assumptions approved — pipeline unblocked")
+    print("Assumptions approved. Resume with:")
+    print(f"  forge plan drive --resume --session {session_dir}")
 
 
 def cmd_kill(args):
@@ -701,15 +608,11 @@ def main():
 
     p = sub.add_parser("init", help="Create a new planner session")
     p.add_argument("slug", help="Semantic slug for the session (kebab-case)")
-    p.add_argument("--fast", action="store_true", help="Use Sonnet for all agents (faster, cheaper)")
-    p.add_argument("--preset", help="Preset name (e.g. web-app) for enrichment plugins")
+    p.add_argument("--preset", help="Preset name for enrichment plugins")
     p.set_defaults(func=cmd_init)
 
-    p = sub.add_parser("set-context", help="Store problem statement and constraints")
-    p.add_argument("--problem", help="The full problem statement")
-    p.add_argument("--tension", help="Core tension description")
-    p.add_argument("--constraint-a", help="Constraint A optimization target")
-    p.add_argument("--constraint-b", help="Constraint B optimization target")
+    p = sub.add_parser("set-context", help="Store problem statement")
+    p.add_argument("--problem", help="Short instruction (e.g. 'Implement PROJ-123')")
     p.set_defaults(func=cmd_set_context)
 
     p = sub.add_parser("status", help="Print current state as JSON")
@@ -719,7 +622,7 @@ def main():
 
     p = sub.add_parser("dispatch", help="Get dispatch config for a phase")
     p.add_argument("phase", choices=PHASE_ORDER)
-    p.add_argument("--model", choices=["sonnet", "opus", "haiku"], help="Override model (for fallback)")
+    p.add_argument("--model", choices=["sonnet", "opus", "haiku"], help="Override model")
     p.set_defaults(func=cmd_dispatch)
 
     p = sub.add_parser("run", help="Mark phase as in_progress")
@@ -755,18 +658,28 @@ def main():
 
     sub.add_parser("complete", help="Verify all phases complete and final-plan.md exists").set_defaults(func=cmd_complete)
 
-    p = sub.add_parser("drive", help="Run the full 6-phase planner (plan → final-plan.md)")
+    p = sub.add_parser("drive", help="Run the full planner pipeline (plan → final-plan.md)")
     p.add_argument("--problem", help="The full problem statement")
     p.add_argument("--repo", help="Path to the repository (default: cwd)")
     p.add_argument("--slug", help="Session name slug (kebab-case)")
-    p.add_argument("--preset", help="Preset name (e.g. web-app) for enrichment plugins")
-    p.add_argument("--fast", action="store_true", help="Use Sonnet for all agents")
+    p.add_argument("--preset", help="Preset name for enrichment plugins")
     p.add_argument("--resume", action="store_true", help="Resume the most recent session")
-    p.add_argument("--tension", help="Core tension (optional)")
-    p.add_argument("--constraint-a", help="Constraint A (optional)")
-    p.add_argument("--constraint-b", help="Constraint B (optional)")
+    p.add_argument("--session", default="", help="Session directory to resume (default: auto-detect)")
     p.add_argument("--workers", type=int, default=2, help="Parallel workers per phase (default: 2)")
+    p.add_argument("--auto-approve", action="store_true",
+                   help="Skip assumption gate — proceed without human review of spec gaps")
+    p.add_argument("--force", action="store_true",
+                   help="Override plan approval gate — allow re-run even if plan was already approved")
+    p.add_argument("--clean", action="store_true",
+                   help="Start a fresh run ignoring all prior session data")
+    p.add_argument("--lite", action="store_true",
+                   help="Force lite pipeline mode (single architect/critic/refiner, no judge)")
     p.set_defaults(func=cmd_drive)
+
+    p = sub.add_parser("approve", help="Approve assumptions and unblock pipeline")
+    p.add_argument("--session", default="", help="Session directory (default: auto-detect)")
+    p.add_argument("--answers", help="Path to markdown file with corrections/answers to spec gaps")
+    p.set_defaults(func=cmd_approve)
 
     p = sub.add_parser("kill", help="Graceful planner termination")
     p.add_argument("--reason", default="", help="Reason for killing")

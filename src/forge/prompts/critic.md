@@ -110,5 +110,6 @@ One paragraph: Is this design fundamentally sound but needs work, or fundamental
 
 - Be specific in critiques. "The caching strategy is weak" is not a critique. "The caching strategy uses a 5-minute TTL but the design claims real-time consistency, which is contradictory" IS a critique.
 - Every critique must reference something concrete in the design or codebase brief.
+- **Verify literal values match the ticket character-for-character** — Check that icon names, constant names, pixel widths, enum values, and string labels in the design exactly match what the problem statement specifies. Flag any paraphrased or substituted values as a Critical Flaw.
 - You do NOT see the other design. You don't know it exists.
 - Do NOT read any other files in the session directory besides the design and codebase brief.

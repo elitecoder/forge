@@ -8,6 +8,15 @@
 
 set -eo pipefail
 
+# Only run for executor agents that edit code (code, fix, code-review-fix)
+if [ "${FORGE_MODE:-}" != "executor" ]; then
+  exit 0
+fi
+case "${FORGE_AGENT:-}" in
+  code|fix|code-review-fix) ;;
+  *) exit 0 ;;
+esac
+
 INPUT=$(cat)
 FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty')
 

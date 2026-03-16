@@ -1,4 +1,4 @@
-# Copyright 2026. Planner driver — deterministic 6-phase orchestrator.
+# Copyright 2026. Planner driver — deterministic multi-phase orchestrator.
 
 import json
 import os
@@ -19,58 +19,72 @@ from forge.planner.engine.state import (
     StateManager,
     now_iso,
 )
-from forge.planner.commands import resolve_skill_dir
+from forge.planner.commands import resolve_skill_dir, _load_planner_conventions
 from forge.providers.protocol import AgentResult, Provider
 
 
 MAX_RETRIES = 2
 
-# Map agent_type to prompt template filename and allowed tools (from frontmatter)
-_AGENT_TYPE_PROMPTS: dict[str, tuple[str, str]] = {
-    "planner-architect-topdown":  ("architect-topdown.md", ""),
-    "planner-architect-bottomup": ("architect-bottomup.md", ""),
-    "planner-critic":             ("critic.md",            ""),
-    "planner-refiner":            ("refiner.md",           ""),
-    "planner-judge":              ("judge.md",             ""),
+# Plugin prefix for agent names (from skins/claude-code/.claude-plugin/plugin.json)
+_PLUGIN_PREFIX = "forge"
+
+# Agent names per phase (resolved as {_PLUGIN_PREFIX}:{name} by --agent flag)
+_AGENT_NAMES: dict[str, str] = {
+    "planner-gatekeeper": "planner-gatekeeper",
+    "planner-router":     "planner-router",
+    "planner-architect":  "planner-architect",
+    "planner-critic":     "planner-critic",
+    "planner-refiner":    "planner-refiner",
+    "planner-judge":      "planner-judge",
+    "planner-approval":   "planner-approval",
 }
 
 PHASE_MODELS = {
-    "recon":       {"default": "sonnet", "fast": "sonnet"},
-    "architects":  {"default": "opus",   "fast": "sonnet"},
-    "critics":     {"default": "opus",   "fast": "sonnet"},
-    "refiners":    {"default": "sonnet", "fast": "sonnet"},
-    "judge":       {"default": "opus",   "fast": "sonnet"},
-    "enrichment":  {"default": "sonnet", "fast": "sonnet"},
+    "gatekeeper":  {"default": "opus"},
+    "router":      {"default": "haiku"},
+    "architects":  {"default": "opus"},
+    "critics":     {"default": "opus"},
+    "refiners":    {"default": "sonnet"},
+    "judge":       {"default": "opus"},
+    "enrichment":  {"default": "sonnet"},
+    "approval":    {"default": "sonnet"},
 }
 
 PHASE_MAX_TURNS = {
-    "recon": 200,
+    "gatekeeper": 50,
+    "router": 20,
     "architects": 200,
     "critics": 200,
     "refiners": 200,
     "judge": 200,
     "enrichment": 200,
+    "approval": 50,
 }
 
 PHASE_TIMEOUT_S = {
-    "recon": 900,
+    "gatekeeper": 600,
+    "router": 120,
     "architects": 900,
     "critics": 600,
     "refiners": 600,
     "judge": 600,
     "enrichment": 600,
+    "approval": 300,
 }
 
-# Agent definitions per phase: name, output file, agent_type, optional id
+# Agent definitions per phase
 PHASE_AGENTS: dict[str, list[dict]] = {
-    "recon": [
-        {"name": "recon", "output": "codebase-brief.md"},
+    "gatekeeper": [
+        {"name": "gatekeeper", "agent_type": "planner-gatekeeper", "output": "spec-verdict"},
+    ],
+    "router": [
+        {"name": "router", "agent_type": "planner-router", "output": "complexity-verdict"},
     ],
     "architects": [
-        {"name": "architect-a", "agent_type": "planner-architect-topdown",
-         "output": "design-a.md", "id": "a"},
-        {"name": "architect-b", "agent_type": "planner-architect-bottomup",
-         "output": "design-b.md", "id": "b"},
+        {"name": "architect-a", "agent_type": "planner-architect",
+         "output": "design-a.md", "id": "a", "reasoning": "top-down"},
+        {"name": "architect-b", "agent_type": "planner-architect",
+         "output": "design-b.md", "id": "b", "reasoning": "bottom-up"},
     ],
     "critics": [
         {"name": "critic-a", "agent_type": "planner-critic",
@@ -87,20 +101,13 @@ PHASE_AGENTS: dict[str, list[dict]] = {
     "judge": [
         {"name": "judge", "agent_type": "planner-judge", "output": "final-plan.md"},
     ],
+    "approval": [
+        {"name": "approval", "agent_type": "planner-approval", "output": "approval-verdict"},
+    ],
 }
-
-DERIVE_CONTEXT_PROMPT = """Given this problem statement, extract:
-1. The core tension (the fundamental trade-off)
-2. Constraint A (one side of the trade-off to optimize for)
-3. Constraint B (the other side of the trade-off to optimize for)
-
-Problem: {problem}
-
-Respond in JSON: {{"tension": "...", "constraint_a": "...", "constraint_b": "..."}}"""
 
 
 def _kill_child_processes():
-    """Kill child processes of this driver. Mirrors executor._kill_child_processes."""
     my_pid = os.getpid()
     try:
         subprocess.run(["pkill", "-TERM", "-P", str(my_pid)], capture_output=True, timeout=3)
@@ -113,9 +120,8 @@ def _kill_child_processes():
         pass
 
 
-def _resolve_model(phase: str, fast: bool) -> str:
-    profile = "fast" if fast else "default"
-    return PHASE_MODELS.get(phase, {}).get(profile, "sonnet")
+def _resolve_model(phase: str) -> str:
+    return PHASE_MODELS.get(phase, {}).get("default", "sonnet")
 
 
 def _activity_log(session_dir: str) -> str:
@@ -127,7 +133,6 @@ def _log_activity(session_dir: str, message: str) -> None:
 
 
 def _load_enrichment_plugins(preset_path: str) -> list[dict]:
-    """Load enrichment plugins from the preset manifest."""
     if not preset_path:
         return []
     manifest = Path(preset_path) / "manifest.json"
@@ -141,12 +146,10 @@ def _load_enrichment_plugins(preset_path: str) -> list[dict]:
 
 
 def _load_system_prompt(prompts_dir: str, template_file: str) -> str:
-    """Load a prompt template, stripping YAML frontmatter."""
     path = Path(prompts_dir) / template_file
     if not path.is_file():
         return ""
     text = path.read_text(encoding="utf-8")
-    # Strip YAML frontmatter (--- ... ---)
     if text.startswith("---"):
         end = text.find("---", 3)
         if end != -1:
@@ -155,46 +158,31 @@ def _load_system_prompt(prompts_dir: str, template_file: str) -> str:
 
 
 class PlannerDriver:
-    """Deterministic 6-phase planner orchestrator.
+    """Deterministic multi-phase planner orchestrator.
 
-    Runs: recon -> architects -> critics -> refiners -> judge -> enrichment
+    Runs: gatekeeper -> router -> architects -> critics -> refiners -> judge -> enrichment -> approval
     Each phase: dispatch agents -> wait -> validate evidence -> pass/fail
     """
 
     def __init__(self, provider: Provider, session_dir: str, prompts_dir: str = "",
                  max_retries: int = MAX_RETRIES, workers: int = 2,
-                 repo_dir: str = "", preset: str = "", preset_path: str = ""):
+                 repo_dir: str = "", preset: str = "", preset_path: str = "",
+                 auto_approve: bool = False):
         self.provider = provider
         self.session_dir = session_dir
         self.repo_dir = repo_dir or session_dir
         self.prompts_dir = prompts_dir or str(Path(__file__).parent.parent / "prompts")
         self.preset = preset
         self.preset_path = preset_path
+        self.auto_approve = auto_approve
         self.state_manager = StateManager(Path(session_dir) / ".planner-state.json")
         self.max_retries = max_retries
         self.workers = workers
-        self._status_writer: StatusWriter | None = None
 
-    def _estimate_token_count(self, fast: bool) -> None:
-        """Display estimated token usage before starting. Non-blocking."""
-        # Heuristic: each phase uses ~4K input + ~4K output tokens.
-        # Multi-agent phases (architects, critics, refiners) multiply by agent count.
-        agent_counts = {
-            "recon": 1, "architects": 2, "critics": 2,
-            "refiners": 2, "judge": 1, "enrichment": 1,
-        }
-        phases = PHASE_ORDER if not fast else [p for p in PHASE_ORDER if p != "enrichment"]
-        tokens_per_agent = 8000  # ~4K in + ~4K out
-        total = sum(agent_counts.get(p, 1) * tokens_per_agent for p in phases)
-        model_label = "fast (Sonnet)" if fast else "standard (Opus+Sonnet)"
-        print(f"  Estimated tokens: ~{total:,} ({len(phases)} phases, {model_label})")
-
-    def run(self, problem: str, fast: bool = False,
-            tension: str = "", constraint_a: str = "", constraint_b: str = "") -> Path | None:
-        """Run all 6 phases, return path to final-plan.md or None on failure."""
-        self._estimate_token_count(fast)
-        self._init_session(problem, fast)
-        self._derive_context(problem, tension, constraint_a, constraint_b)
+    def run(self, problem: str, force: bool = False, clean: bool = False,
+            lite: bool = False, **kwargs) -> Path | None:
+        """Run all phases, return path to final-plan.md or None on failure."""
+        self._init_session(problem, lite=lite)
         self._install_signal_handlers()
         self._set_driver_pid()
 
@@ -213,6 +201,22 @@ class PlannerDriver:
                 if phase is None:
                     break
                 self._dispatch_phase(phase, state)
+
+                # After gatekeeper: spec gate + complexity routing
+                if phase == "gatekeeper":
+                    state = self.state_manager.load()
+                    gk_ps = state.phases.get("gatekeeper")
+                    if gk_ps and gk_ps.status == PhaseStatus.COMPLETE:
+                        if not self.auto_approve and self._verdict_blocks():
+                            continue
+                        self._apply_complexity_routing()
+
+                # After refiners in lite mode: promote refined-a → final-plan
+                if phase == "refiners":
+                    state = self.state_manager.load()
+                    rs = state.phases.get("refiners")
+                    if rs and rs.status == PhaseStatus.COMPLETE and state.pipeline_mode == "lite":
+                        self._promote_refined_to_final()
         finally:
             self._clear_driver_pid()
 
@@ -225,6 +229,53 @@ class PlannerDriver:
         emit(self.session_dir, EventType.PLANNER_COMPLETED, "planner",
              preset=self.preset)
         return plan_path
+
+    def _verdict_blocks(self) -> bool:
+        """Check if spec-verdict is BLOCKED. If so, kill pipeline for human review."""
+        verdict_path = Path(self.session_dir) / "spec-verdict"
+        if not verdict_path.is_file():
+            return False
+        verdict = verdict_path.read_text().strip().upper()
+        if verdict == "BLOCKED":
+            _log_activity(self.session_dir, "Spec verdict: BLOCKED — pausing for human review")
+            def mutate(s: PlannerState) -> None:
+                s.killed = True
+                s.kill_reason = "spec_review_required"
+            self.state_manager.update(mutate)
+            return True
+        return False
+
+    def _apply_complexity_routing(self) -> None:
+        """Read complexity-verdict and set pipeline_mode (FULL or LITE)."""
+        verdict_path = Path(self.session_dir) / "complexity-verdict"
+        mode = "full"
+        if verdict_path.is_file():
+            raw = verdict_path.read_text().strip().upper()
+            if raw == "LITE":
+                mode = "lite"
+
+        def mutate(s: PlannerState) -> None:
+            s.pipeline_mode = mode
+        self.state_manager.update(mutate)
+        _log_activity(self.session_dir, f"Pipeline mode: {mode}")
+
+        if mode == "lite":
+            # Skip "b" agents — mark critics/refiners as needing only "a" variants
+            # The router phase handles this; the evidence validator uses pipeline_mode
+            _log_activity(self.session_dir, "Lite mode: single architect/critic/refiner track")
+
+    def _promote_refined_to_final(self) -> None:
+        """In lite mode, copy refined-a.md → final-plan.md and skip judge."""
+        refined = Path(self.session_dir) / "refined-a.md"
+        final = Path(self.session_dir) / "final-plan.md"
+        if refined.is_file() and not final.is_file():
+            final.write_text(refined.read_text())
+            _log_activity(self.session_dir, "Lite mode: promoted refined-a → final-plan")
+
+            def skip_judge(s: PlannerState) -> None:
+                s.phases["judge"].status = PhaseStatus.SKIPPED
+                s.phases["judge"].completed_at = now_iso()
+            self.state_manager.update(skip_judge)
 
     def _install_signal_handlers(self) -> None:
         def _handle(sig, _frame):
@@ -261,16 +312,11 @@ class PlannerDriver:
         except Exception:
             pass
 
-    def _init_session(self, problem: str, fast: bool) -> None:
+    def _init_session(self, problem: str, lite: bool = False) -> None:
         os.makedirs(self.session_dir, exist_ok=True)
         slug = Path(self.session_dir).name
 
         phases = {name: PhaseState() for name in PHASE_ORDER}
-        if fast:
-            phases["enrichment"] = PhaseState(
-                status=PhaseStatus.SKIPPED,
-                completed_at=now_iso(),
-            )
 
         state = PlannerState(
             slug=slug,
@@ -278,8 +324,8 @@ class PlannerDriver:
             repo_dir=self.repo_dir,
             preset=self.preset,
             preset_path=self.preset_path,
-            fast_mode=fast,
             problem_statement=problem,
+            pipeline_mode="lite" if lite else "",
             phases=phases,
             created_at=now_iso(),
             updated_at=now_iso(),
@@ -287,36 +333,7 @@ class PlannerDriver:
         self.state_manager.save(state)
         emit(self.session_dir, EventType.PLANNER_STARTED, "planner",
              preset=self.preset)
-        _log_activity(self.session_dir, f"Session initialized: {slug} (fast={fast})")
-
-    def _derive_context(self, problem: str, tension: str,
-                        constraint_a: str, constraint_b: str) -> None:
-        if tension and constraint_a and constraint_b:
-            def mutate(s: PlannerState) -> None:
-                s.core_tension = tension
-                s.constraint_a = constraint_a
-                s.constraint_b = constraint_b
-            self.state_manager.update(mutate)
-            return
-
-        prompt = DERIVE_CONTEXT_PROMPT.format(problem=problem)
-        raw = self.provider.run_judge(prompt, model="fast")
-        try:
-            parsed = json.loads(raw)
-        except (json.JSONDecodeError, TypeError):
-            parsed = {}
-
-        derived_tension = tension or parsed.get("tension", "")
-        derived_a = constraint_a or parsed.get("constraint_a", "")
-        derived_b = constraint_b or parsed.get("constraint_b", "")
-
-        def mutate(s: PlannerState) -> None:
-            s.core_tension = derived_tension
-            s.constraint_a = derived_a
-            s.constraint_b = derived_b
-
-        self.state_manager.update(mutate)
-        _log_activity(self.session_dir, "Context derived from problem statement")
+        _log_activity(self.session_dir, f"Session initialized: {slug}")
 
     def _dispatch_phase(self, phase: str, state: PlannerState) -> None:
         _log_activity(self.session_dir, f"Phase {phase} -> in_progress")
@@ -332,15 +349,26 @@ class PlannerDriver:
 
         if phase == "enrichment":
             self._dispatch_enrichment(state)
+        elif phase == "router":
+            # Router is handled by gatekeeper output + _apply_complexity_routing
+            # If we have a complexity-verdict file, skip the agent
+            verdict_path = Path(self.session_dir) / "complexity-verdict"
+            if not verdict_path.is_file():
+                agents = PHASE_AGENTS.get(phase, [])
+                for agent_def in agents:
+                    self._run_agent(phase, agent_def, state)
         else:
             agents = PHASE_AGENTS.get(phase, [])
-            # Only run agents whose output files are missing (skip already-complete on retry)
+            # In lite mode, only run "a" variant agents
+            if state.pipeline_mode == "lite":
+                agents = [a for a in agents if a.get("id", "") != "b"]
+            # Only run agents whose output files are missing
             agents_to_run = [
                 ad for ad in agents
                 if not os.path.isfile(os.path.join(self.session_dir, ad.get("output", "")))
             ]
             if not agents_to_run:
-                agents_to_run = agents  # First run: run all
+                agents_to_run = agents
 
             if len(agents_to_run) > 1 and self.workers > 1:
                 with ThreadPoolExecutor(max_workers=self.workers) as pool:
@@ -357,7 +385,7 @@ class PlannerDriver:
         elapsed = time.monotonic() - phase_start
         elapsed_str = f"{int(elapsed // 60)}m {int(elapsed % 60)}s"
 
-        evidence = validate_phase(self.session_dir, phase)
+        evidence = validate_phase(self.session_dir, phase, state.pipeline_mode)
         if evidence.passed:
             def mark_passed(s: PlannerState) -> None:
                 s.phases[phase].status = PhaseStatus.COMPLETE
@@ -386,20 +414,18 @@ class PlannerDriver:
                           f"(retry {retries + 1}/{self.max_retries}): {evidence.message}")
 
     def _run_agent(self, phase: str, agent_def: dict, state: PlannerState) -> AgentResult:
-        model = _resolve_model(phase, state.fast_mode)
+        model = _resolve_model(phase)
         max_turns = PHASE_MAX_TURNS.get(phase, 200)
         timeout_s = PHASE_TIMEOUT_S.get(phase, 900)
         prompt = self._build_phase_prompt(phase, agent_def, state)
         step_name = agent_def["name"]
         cwd = state.repo_dir or self.repo_dir
 
-        # Load system prompt and tool restrictions from prompt templates
+        # Resolve agent name for --agent flag
         agent_type = agent_def.get("agent_type", "")
-        system_prompt = ""
-        allowed_tools = ""
-        if agent_type and agent_type in _AGENT_TYPE_PROMPTS:
-            template_file, allowed_tools = _AGENT_TYPE_PROMPTS[agent_type]
-            system_prompt = _load_system_prompt(self.prompts_dir, template_file)
+        agent_name = ""
+        if agent_type and agent_type in _AGENT_NAMES:
+            agent_name = f"{_PLUGIN_PREFIX}:{_AGENT_NAMES[agent_type]}"
 
         result = self.provider.run_agent(
             prompt=prompt,
@@ -410,8 +436,8 @@ class PlannerDriver:
             step_name=step_name,
             session_dir=self.session_dir,
             activity_log_path=_activity_log(self.session_dir),
-            system_prompt=system_prompt,
-            allowed_tools=allowed_tools,
+            agent_name=agent_name,
+            extra_env={"FORGE_MODE": "planner", "FORGE_AGENT": step_name},
         )
         if result.timed_out:
             _log_activity(self.session_dir, f"WARNING: agent {step_name} timed out after {timeout_s}s")
@@ -422,7 +448,7 @@ class PlannerDriver:
         if not plugins:
             return
 
-        model = _resolve_model("enrichment", state.fast_mode)
+        model = _resolve_model("enrichment")
         max_turns = PHASE_MAX_TURNS.get("enrichment", 200)
 
         for plugin in plugins:
@@ -453,26 +479,41 @@ class PlannerDriver:
                             state: PlannerState) -> str:
         design_id = agent_def.get("id", "")
         sd = self.session_dir
+        conventions = _load_planner_conventions(state.preset_path)
 
-        if phase == "recon":
-            return (
-                f"## Recon\n\n"
-                f"- **Session directory**: {sd}\n"
-                f"- **Problem statement**: {state.problem_statement}\n"
-                f"- **Write codebase brief to**: {sd}/codebase-brief.md\n\n"
-                f"Analyze the codebase and produce a comprehensive brief."
-            )
-
-        if phase == "architects":
-            constraint = state.constraint_a if design_id == "a" else state.constraint_b
-            design_file = f"design-{design_id}.md"
+        if phase == "gatekeeper":
             return (
                 f"## Context\n\n"
                 f"- **Session directory**: {sd}\n"
                 f"- **Problem statement**: {state.problem_statement}\n"
-                f"- **Your constraint**: {constraint}\n"
-                f"- **Codebase brief**: {sd}/codebase-brief.md\n"
-                f"- **Write design to**: {sd}/{design_file}"
+                f"- **Write verdict to**: {sd}/spec-verdict (exactly one word: PASS or BLOCKED)\n"
+                f"- **Write gaps to**: {sd}/spec-gaps.md (full analysis for humans)\n"
+                f"- **Write complexity verdict to**: {sd}/complexity-verdict (exactly one word: FULL or LITE)\n\n"
+                f"Evaluate whether the problem statement provides enough information for architects."
+            )
+
+        if phase == "router":
+            return (
+                f"## Context\n\n"
+                f"- **Session directory**: {sd}\n"
+                f"- **Problem statement**: {state.problem_statement}\n"
+                f"- **Write complexity verdict to**: {sd}/complexity-verdict (exactly one word: FULL or LITE)\n\n"
+                f"Assess architectural ambiguity to route to FULL (adversarial dual-track) or LITE (single-track) pipeline."
+            )
+
+        if phase == "architects":
+            reasoning = agent_def.get("reasoning", "top-down")
+            design_file = f"design-{design_id}.md"
+            gaps_path = Path(sd) / "spec-gaps.md"
+            gaps_hint = ""
+            if gaps_path.is_file():
+                gaps_hint = f"\n- **Spec analysis**: {gaps_path} (read this — it contains identified gaps and any answers from the product owner)"
+            return (
+                f"## Context\n\n"
+                f"- **Session directory**: {sd}\n"
+                f"- **Problem statement**: {state.problem_statement}\n"
+                f"- **Reasoning direction**: {reasoning}\n"
+                f"- **Write design to**: {sd}/{design_file}{gaps_hint}{conventions}"
             )
 
         if phase == "critics":
@@ -509,7 +550,17 @@ class PlannerDriver:
                 f"- **Refined design A (revisions)**: {sd}/refined-a.md\n"
                 f"- **Refined design B (revisions)**: {sd}/refined-b.md\n"
                 f"- **Codebase brief**: {sd}/codebase-brief.md\n"
-                f"- **Write final plan to**: {sd}/final-plan.md"
+                f"- **Write final plan to**: {sd}/final-plan.md{conventions}"
+            )
+
+        if phase == "approval":
+            return (
+                f"## Context\n\n"
+                f"- **Session directory**: {sd}\n"
+                f"- **Problem statement**: {state.problem_statement}\n"
+                f"- **Final plan**: {sd}/final-plan.md\n"
+                f"- **Write verdict to**: {sd}/approval-verdict\n\n"
+                f"Compare the final plan against the source ticket requirements and post an APPROVED or FAILED verdict."
             )
 
         return f"Phase: {phase}\nSession: {sd}\nProblem: {state.problem_statement}"

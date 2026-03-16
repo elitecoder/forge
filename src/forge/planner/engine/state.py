@@ -17,7 +17,7 @@ class PhaseStatus(str, enum.Enum):
     SKIPPED = "skipped"
 
 
-PHASE_ORDER = ["recon", "architects", "critics", "refiners", "judge", "enrichment"]
+PHASE_ORDER = ["gatekeeper", "router", "architects", "critics", "refiners", "judge", "enrichment", "approval"]
 
 TERMINAL_STATUSES = {PhaseStatus.COMPLETE, PhaseStatus.SKIPPED}
 
@@ -38,11 +38,9 @@ class PlannerState:
     repo_dir: str = ""
     preset: str = ""
     preset_path: str = ""
-    fast_mode: bool = False
     problem_statement: str = ""
-    core_tension: str = ""
-    constraint_a: str = ""
-    constraint_b: str = ""
+    session_hash: str = ""
+    pipeline_mode: str = ""
     phases: dict[str, PhaseState] = field(default_factory=dict)
     killed: bool = False
     kill_reason: str = ""
@@ -77,11 +75,9 @@ def state_to_dict(state: PlannerState) -> dict:
         "repo_dir": state.repo_dir,
         "preset": state.preset,
         "preset_path": state.preset_path,
-        "fast_mode": state.fast_mode,
         "problem_statement": state.problem_statement,
-        "core_tension": state.core_tension,
-        "constraint_a": state.constraint_a,
-        "constraint_b": state.constraint_b,
+        "session_hash": state.session_hash,
+        "pipeline_mode": state.pipeline_mode,
         "phases": {},
         "killed": state.killed,
         "kill_reason": state.kill_reason,
@@ -124,11 +120,9 @@ def dict_to_state(d: dict) -> PlannerState:
         repo_dir=d.get("repo_dir", ""),
         preset=d.get("preset", ""),
         preset_path=d.get("preset_path", ""),
-        fast_mode=d.get("fast_mode", False),
         problem_statement=d.get("problem_statement", ""),
-        core_tension=d.get("core_tension", ""),
-        constraint_a=d.get("constraint_a", ""),
-        constraint_b=d.get("constraint_b", ""),
+        session_hash=d.get("session_hash", ""),
+        pipeline_mode=d.get("pipeline_mode", ""),
         phases=phases,
         killed=d.get("killed", False),
         kill_reason=d.get("kill_reason", ""),
