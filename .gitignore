@@ -15,3 +15,6 @@ build/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Claude Code local memory
+.claude/projects/*/memory/
