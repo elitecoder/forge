@@ -156,7 +156,7 @@ Public API: <n> functions/methods
 | executor/engine/pipeline_summary.py | 2 | 2 | 2 | 2 | 2 | 10 | Excellent | +10 |
 | executor/engine/resume_advisor.py | 2 | 2 | 2 | 2 | 2 | 10 | Excellent | +10 |
 | executor/engine/triage.py | 2 | 2 | 2 | 2 | 2 | 10 | Excellent | +10 |
-| executor/engine/app_under_test.py | 0 | 0 | 0 | 0 | 0 | 0 | None | — |
+| executor/engine/app_under_test.py | 2 | 2 | 2 | 2 | 2 | 10 | Excellent | +10 |
 | executor/engine/judge.py | 1 | 0 | 2 | 2 | 2 | 7 | Good | — |
 | setup.py | 2 | 2 | 2 | 2 | 2 | 10 | Excellent | — |
 | cli.py | 2 | 2 | 2 | 2 | 2 | 10 | Excellent | +10 |
@@ -164,11 +164,10 @@ Public API: <n> functions/methods
 | dashboard/server.py | 2 | 1 | 2 | 2 | 2 | 9 | Strong | — |
 | integrations/jira_store.py | 2 | 2 | 2 | 2 | 2 | 10 | Excellent | +10 |
 
-**Aggregate: 1 of 33 modules has zero tests (app_under_test.py). Weighted average ~9.1/10.**
+**Aggregate: 0 of 33 modules have zero tests. Weighted average ~9.4/10.**
 
 ### Improvement Summary
 - **Before:** 16 modules with zero tests, weighted avg 4.2/10
-- **After:** 1 module with zero tests, weighted avg 9.1/10
-- **New tests written:** ~210 across 13 new test files + 1 expanded file
-- **Total test suite:** 1084 tests, all passing
-- **Remaining gap:** `executor/engine/app_under_test.py` (complex dev-server + Playwright integration — better tested via integration tests)
+- **After:** 0 modules with zero tests, weighted avg 9.4/10
+- **New tests written:** ~237 across 14 new test files + 1 expanded file
+- **Total test suite:** 1111 tests, all passing
