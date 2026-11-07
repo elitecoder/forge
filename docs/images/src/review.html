@@ -1,0 +1,34 @@
+<!doctype html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="kit.css"><link rel="stylesheet" href="fig.css">
+<script src="dark.js"></script><script src="fig.js"></script></head>
+<body><div id="fig">
+<div class="k">code_review · two phases</div>
+<div class="h">Review, fix, and a <em>judge</em> to check the fix.</div>
+<p class="cap">The judge runs when the preset gives code_review a judge setting. The bundled presets don't.</p>
+<svg id="s" viewBox="0 0 1104 300" width="1104" height="300" style="margin-top:28px"></svg>
+</div>
+<script>
+// Source: executor/driver.py run_code_review (verdict CLEAN / HAS_ISSUES, fix phase,
+// code_review-checklist.json, spawn_judge with findings + checklist + git diff,
+// max_retries default 3), executor/engine/registry.py (judge model defaults to opus).
+const p = [], MY = 150;
+p.push(D.box(0, MY - 32, 160, 64), D.t(80, MY - 6, "review agent"), D.t(80, MY + 18, "opus", "t"));
+p.push(D.line([[160, MY], [194, MY]]));
+p.push(`<path class="f" d="M250 ${MY - 38} L304 ${MY} L250 ${MY + 38} L196 ${MY} Z"/>`, D.t(250, MY + 6, "verdict"));
+// HAS_ISSUES -> fix agent
+p.push(D.line([[304, MY], [416, MY]]), D.t(360, MY - 12, "HAS_ISSUES", "t"));
+p.push(D.box(420, MY - 32, 170, 64), D.t(505, MY - 6, "fix agent"), D.t(505, MY + 18, "fix phase", "t"));
+p.push(D.line([[590, MY], [686, MY]]), D.t(638, MY - 12, "checklist", "t"));
+p.push(D.box(690, MY - 32, 170, 64, "f m"), D.t(775, MY - 6, "judge", "mt"), D.t(775, MY + 18, "optional · opus", "t"));
+p.push(D.t(775, MY - 50, "findings, checklist, git diff", "t"));
+p.push(D.line([[860, MY], [996, MY]]), D.t(928, MY - 12, "all pass", "t"));
+p.push(D.dot(1010, MY, 11, "inkf"), D.t(1010, MY + 40, "step", "t"), D.t(1010, MY + 60, "passes", "t"));
+// CLEAN shortcut
+p.push(D.line([[250, MY - 38], [250, 30], [1010, 30], [1010, MY - 15]]), D.t(560, 22, "CLEAN", "t"));
+// judge rejects: feedback, next round
+p.push(D.line([[775, MY + 32], [775, 252], [505, 252], [505, MY + 36]], "m"),
+  D.t(640, 282, "open findings go back, up to 3 rounds", "t mt"));
+// no verdict
+p.push(D.line([[250, MY + 38], [250, 240]], "d"), D.t(250, 268, "no verdict file", "t"), D.t(250, 290, "step fails", "t"));
+D.draw(p);
+</script></body></html>

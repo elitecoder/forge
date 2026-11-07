@@ -1,0 +1,43 @@
+<!doctype html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="kit.css"><link rel="stylesheet" href="fig.css">
+<script src="dark.js"></script><script src="fig.js"></script></head>
+<body><div id="fig">
+<div class="k">a real run · activity log</div>
+<div class="h">Checks run side by side, and a failure gets a <em>fix</em>.</div>
+<p class="cap">The last ten minutes of a run with a 10-step custom preset, from the dashboard snapshot.</p>
+<svg id="s" viewBox="0 0 1104 480" width="1104" height="480" style="margin-top:28px"></svg>
+</div>
+<script>
+// Source: docs/index.html activity log, 20:57:51 to 21:07:46 (595 s).
+const T0 = 232, K = 700 / 595, X = (t) => +(T0 + t * K).toFixed(1);
+const rows = ["code", "lint", "test", "db_test", "e2e", "code_review", "smoke", "visual", "report", "create_pr"];
+const Y = (n) => 24 + rows.indexOf(n) * 42;
+const p = [];
+// grid and time axis
+[[9, "20:58"], [129, "21:00"], [249, "21:02"], [369, "21:04"], [489, "21:06"]].forEach(([t, s]) => {
+  p.push(`<path class="thin" d="M${X(t)} 440 V448"/>`, D.t(X(t), 472, s, "t"));
+});
+p.push(`<path class="thin" d="M${T0} 440 H${X(595)}"/>`);
+rows.forEach((r) => p.push(D.t(132, Y(r) + 6, r, "", "end")));
+const bar = (n, a, b, c = "w") => D.box(X(a), Y(n) - 8, Math.max(X(b) - X(a), 4), 16, c);
+const note = (n, x, s, c = "t") => D.t(x, Y(n) + 5, s, c, "start");
+// code: passed after 2870 s, before the window opens
+p.push(D.box(150, Y("code") - 8, T0 - 150, 16, "w"),
+  `<path class="f" style="stroke:var(--paper);stroke-width:7" d="M186 ${Y("code") + 12} L194 ${Y("code") - 12}"/>`,
+  `<path d="M181 ${Y("code") + 12} L189 ${Y("code") - 12} M191 ${Y("code") + 12} L199 ${Y("code") - 12}"/>`,
+  note("code", T0 + 12, "passed after 47m 50s"));
+p.push(bar("lint", 0, 8), note("lint", X(8) + 10, "8s"));
+p.push(bar("test", 0, 7), note("test", X(7) + 10, "7s"));
+p.push(bar("db_test", 0, 81), note("db_test", X(81) + 10, "81s"));
+p.push(bar("e2e", 81, 279), note("e2e", X(279) + 10, "198s · sonnet"));
+p.push(bar("code_review", 81, 258), note("code_review", X(258) + 10, "177s · opus"));
+// smoke: fails at once, fix agent repairs it
+p.push(D.dot(X(280) + 2, Y("smoke"), 7, "mf"),
+  D.box(X(280) + 14, Y("smoke") - 8, X(437) - X(280) - 14, 16, "f m"),
+  note("smoke", X(437) + 10, "fix agent · fixed on attempt 1", "mt"),
+  D.t(X(279) - 14, Y("smoke") + 5, "failed", "t mt", "end"));
+p.push(bar("visual", 279, 294), note("visual", X(294) + 10, "15s"));
+p.push(D.dot(X(438), Y("report"), 6, "inkf"), note("report", X(438) + 14, "report written"));
+p.push(bar("create_pr", 438, 595), note("create_pr", X(595) + 10, "158s · sonnet"));
+D.draw(p);
+</script></body></html>

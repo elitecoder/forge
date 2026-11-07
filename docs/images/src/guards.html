@@ -1,0 +1,41 @@
+<!doctype html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="kit.css"><link rel="stylesheet" href="fig.css">
+<script src="dark.js"></script><script src="fig.js"></script></head>
+<body><div id="fig">
+<div class="k">inside one code or fix step</div>
+<div class="h">An agent can't stop while the <em>build</em> is broken.</div>
+<p class="cap">Plugin hooks run inside the agent, then Forge checks the step's proof after the agent exits.</p>
+<svg id="s" viewBox="0 0 1104 286" width="1104" height="286" style="margin-top:28px"></svg>
+</div>
+<script>
+// Source: skins/claude-code/hooks/hooks.json, scripts/lint-on-edit.sh, scripts/verify-build.sh
+// (FORGE_AGENT code|fix|code-review-fix, exit 2 blocks the stop), providers/claude.py
+// (_STALL_TIMEOUT_S = 900), executor/engine/pipeline_ops.py mark_passed + checkpoint.py.
+const p = [], Y0 = 130, Y1 = 190, MY = 160;
+// fresh process
+p.push(D.dot(10, MY, 7, "inkf"), D.line([[18, MY], [136, MY]]),
+  D.t(0, MY + 52, "new claude -p", "t", "start"), D.t(0, MY + 74, "for each step", "t", "start"));
+// the agent's run
+p.push(D.box(140, Y0, 620, Y1 - Y0, "w"), D.t(160, MY + 7, "agent works", "si", "start"));
+[310, 370, 430, 490].forEach((x) => p.push(`<path d="M${x} ${Y0 + 14} V${Y1 - 14}"/>`,
+  `<path class="thin d" d="M${x} ${Y1} V${Y1 + 30}"/>`));
+p.push(D.t(400, Y0 - 14, "edits", "t"),
+  D.t(400, Y1 + 56, "after every edit: ESLint + Prettier", "t"),
+  D.t(400, Y1 + 80, "on JavaScript and TypeScript files", "t"));
+// stop hook
+p.push(`<path class="m" style="stroke-width:3" d="M660 ${Y0 + 10} V${Y1 - 10}"/>`,
+  D.curve([660, Y0 - 6], [660, 78], [580, 78], [580, Y0 - 8], "m"),
+  D.t(620, 36, "build fails: stop blocked", "t mt"),
+  D.t(620, 58, "runs the preset's build", "t"),
+  D.t(696, Y0 - 14, "tries to stop", "t", "start"));
+// stall guard
+p.push(`<path class="thin d" d="M730 ${Y1} V${Y1 + 30}"/>`, D.t(730, Y1 + 56, "15 min silent:", "t"),
+  D.t(730, Y1 + 80, "process killed", "t"));
+// Forge's own check
+p.push(D.line([[760, MY], [826, MY]]), D.box(830, Y0, 140, Y1 - Y0),
+  D.t(900, MY - 4, "proof check"), D.t(900, MY + 18, "evidence rules", "t"),
+  D.line([[970, MY], [1040, MY]]),
+  `<rect class="inkf" x="1044" y="${MY - 10}" width="20" height="20" rx="2"/>`,
+  D.t(1054, MY + 52, "checkpoint", "t"), D.t(1104, MY + 74, "&lt;step&gt;.passed", "t", "end"));
+D.draw(p);
+</script></body></html>
