@@ -7,7 +7,7 @@ Forge brings rigorous, adversarial architectural planning and reliable step-by-s
 Two subcommands. One idea: *think deeply, then execute reliably.*
 
 ```
-pip install forgeai
+pip install git+https://github.com/elitecoder/forge.git
 forge plan "add user authentication"
 forge execute --preset npm-ts
 ```
@@ -21,8 +21,8 @@ forge execute --preset npm-ts
 ## Installation
 
 ```bash
-# From PyPI
-pip install forgeai
+# From GitHub
+pip install git+https://github.com/elitecoder/forge.git
 
 # From source
 git clone https://github.com/elitecoder/forge.git

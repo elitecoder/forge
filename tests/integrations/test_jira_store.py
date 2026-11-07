@@ -74,8 +74,17 @@ class TestJiraSessionStoreInit:
     @patch.dict("os.environ", {}, clear=True)
     def test_defaults(self):
         store = JiraSessionStore()
-        assert "jira.example.com" in store.base_url
+        assert store.base_url == ""
         assert store.token == ""
+
+    @patch.dict("os.environ", {"JIRA_TOKEN": "tok"}, clear=True)
+    @patch("forge.integrations.jira_store.urlopen")
+    def test_token_without_base_url_skips_upload(self, mock_urlopen, tmp_path):
+        store = JiraSessionStore()
+        zip_path = tmp_path / "session.zip"
+        zip_path.write_bytes(b"PK\x03\x04fake")
+        assert store.upload_session("PROJ-1", zip_path, "h") is False
+        mock_urlopen.assert_not_called()
 
 
 class TestUploadSession:
@@ -88,6 +97,7 @@ class TestUploadSession:
     def test_success(self, mock_urlopen, tmp_path):
         store = JiraSessionStore()
         store.token = "tok"
+        store.base_url = "https://jira.example.com"
         zip_path = tmp_path / "session.zip"
         zip_path.write_bytes(b"PK\x03\x04fake")
         mock_urlopen.return_value = MagicMock()
@@ -99,6 +109,7 @@ class TestUploadSession:
         from urllib.error import HTTPError
         store = JiraSessionStore()
         store.token = "tok"
+        store.base_url = "https://jira.example.com"
         zip_path = tmp_path / "session.zip"
         zip_path.write_bytes(b"data")
         mock_urlopen.side_effect = HTTPError(None, 500, "err", {}, None)
@@ -107,6 +118,7 @@ class TestUploadSession:
     def test_missing_file_returns_false(self, tmp_path):
         store = JiraSessionStore()
         store.token = "tok"
+        store.base_url = "https://jira.example.com"
         assert store.upload_session("PROJ-1", tmp_path / "nonexistent.zip", "h") is False
 
 
@@ -120,6 +132,7 @@ class TestDownloadLatestSession:
     def test_no_matching_attachments(self, mock_urlopen):
         store = JiraSessionStore()
         store.token = "tok"
+        store.base_url = "https://jira.example.com"
         response = MagicMock()
         response.read.return_value = json.dumps({
             "fields": {"attachment": [{"filename": "other.txt", "created": "2026-01-01"}]}
@@ -138,6 +151,7 @@ class TestPostComment:
     def test_success(self, mock_urlopen):
         store = JiraSessionStore()
         store.token = "tok"
+        store.base_url = "https://jira.example.com"
         mock_urlopen.return_value = MagicMock()
         assert store.post_comment("PROJ-1", "**bold**") is True
 
@@ -152,6 +166,7 @@ class TestUpdateComment:
     def test_success(self, mock_urlopen):
         store = JiraSessionStore()
         store.token = "tok"
+        store.base_url = "https://jira.example.com"
         mock_urlopen.return_value = MagicMock()
         assert store.update_comment("PROJ-1", "456", "updated") is True
 
@@ -166,6 +181,7 @@ class TestGetComments:
     def test_filters_forge_comments(self, mock_urlopen):
         store = JiraSessionStore()
         store.token = "tok"
+        store.base_url = "https://jira.example.com"
         response_data = {
             "comments": [
                 {"body": "[forge-session:abc] some content", "created": "2026-01-01"},

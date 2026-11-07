@@ -10,7 +10,6 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
-_JIRA_BASE_URL = "https://jira.example.com"
 _FORGE_COMMENT_MARKER = "[forge-session:"
 _EXECUTOR_COMMENT_MARKER = "[forge-executor:"
 _TIMEOUT = 30
@@ -74,7 +73,7 @@ class JiraSessionStore:
     """Session store backed by Jira REST API (attachments + comments)."""
 
     def __init__(self) -> None:
-        self.base_url = os.environ.get("JIRA_BASE_URL", _JIRA_BASE_URL).rstrip("/")
+        self.base_url = os.environ.get("JIRA_BASE_URL", "").rstrip("/")
         self.token = os.environ.get("JIRA_TOKEN", "")
 
     def _headers(self, content_type: str = "application/json") -> dict[str, str]:
@@ -84,7 +83,7 @@ class JiraSessionStore:
         return h
 
     def upload_session(self, ticket_key: str, zip_path: Path, session_hash: str) -> bool:
-        if not self.token:
+        if not (self.token and self.base_url):
             return False
 
         url = f"{self.base_url}/rest/api/2/issue/{ticket_key}/attachments"
@@ -113,7 +112,7 @@ class JiraSessionStore:
             return False
 
     def download_latest_session(self, ticket_key: str, dest_dir: Path, prefix: str) -> Path | None:
-        if not self.token:
+        if not (self.token and self.base_url):
             return None
 
         url = f"{self.base_url}/rest/api/2/issue/{ticket_key}?fields=attachment"
@@ -154,7 +153,7 @@ class JiraSessionStore:
         return dest_dir
 
     def post_comment(self, ticket_key: str, comment: str) -> bool:
-        if not self.token:
+        if not (self.token and self.base_url):
             return False
 
         url = f"{self.base_url}/rest/api/2/issue/{ticket_key}/comment"
@@ -168,7 +167,7 @@ class JiraSessionStore:
             return False
 
     def update_comment(self, ticket_key: str, comment_id: str, comment: str) -> bool:
-        if not self.token:
+        if not (self.token and self.base_url):
             return False
 
         url = f"{self.base_url}/rest/api/2/issue/{ticket_key}/comment/{comment_id}"
@@ -182,7 +181,7 @@ class JiraSessionStore:
             return False
 
     def get_comments(self, ticket_key: str) -> list[dict]:
-        if not self.token:
+        if not (self.token and self.base_url):
             return []
 
         url = f"{self.base_url}/rest/api/2/issue/{ticket_key}/comment"

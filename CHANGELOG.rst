@@ -1,6 +1,15 @@
 Changelog
 =========
 
+0.8.1 (2026-11-07)
+-------------------
+* **Public release**: First public version at ``github.com/elitecoder/forge``.
+* **Jira address is now required**: ``JiraSessionStore`` no longer has a
+  built-in Jira URL. Set ``JIRA_BASE_URL``; without it, Jira uploads and
+  comments are skipped, the same as without ``JIRA_TOKEN``.
+* **Install from GitHub**: The README installs with
+  ``pip install git+https://github.com/elitecoder/forge.git``.
+
 0.7.2 (2026-03-02)
 -------------------
 * **``forge setup`` command**: New CLI subcommand installs required global
