@@ -1,9 +1,0 @@
-/* Size overrides for README figures: GitHub scales a 1200px figure to about 880px. */
-#fig{width:1200px}
-.k{font-size:15px}
-.h{font-size:44px}
-.cap{font-size:20px}
-svg text{font-size:17px}
-svg text.t{font-size:15px}
-svg text.si{font-size:19px}
-svg text.s{font-size:21px}
