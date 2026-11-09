@@ -579,16 +579,17 @@ class TestCodeAgentCommitsItsWork:
         targets = tmp_path / "targets.txt"
         outcome = self._run(
             tmp_path, monkeypatch,
-            script="mkdir pkg && touch pkg/BUILD.bazel && echo 'X = 1' > pkg/feature.py"
+            script="mkdir 'my pkg' && touch 'my pkg/BUILD.bazel'"
+                   " && echo 'X = 1' > 'my pkg/feature.py'"
                    " && git add -A && git commit -qm feat",
             build_command=f"echo {{{{BUILD_TARGETS}}}} > {targets}",
         )
 
         assert outcome.passed, outcome.reason
-        assert outcome.checklist["files_modified"] == ["pkg/BUILD.bazel", "pkg/feature.py"]
-        assert "pkg/feature.py" in outcome.checklist["summary"]
-        assert outcome.detected_packages == ["pkg"]
-        assert targets.read_text().strip() == "//pkg/..."
+        assert outcome.checklist["files_modified"] == ["my pkg/BUILD.bazel", "my pkg/feature.py"]
+        assert "my pkg/feature.py" in outcome.checklist["summary"]
+        assert outcome.detected_packages == ["my pkg"]
+        assert targets.read_text().strip() == "//my pkg/..."
 
     def test_build_check_sees_committed_change_outside_packages(self, tmp_path, monkeypatch):
         outcome = self._run(

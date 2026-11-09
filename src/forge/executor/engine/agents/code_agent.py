@@ -173,7 +173,7 @@ def _detect_packages(cwd: str, base: str = "HEAD") -> list[str]:
     files: set[str] = set(subprocess.run(
         ["git", "diff", "--name-only", base],
         capture_output=True, text=True, cwd=cwd,
-    ).stdout.split())
+    ).stdout.splitlines())
 
     # Uncommitted: modified, staged, and untracked
     status = subprocess.run(
