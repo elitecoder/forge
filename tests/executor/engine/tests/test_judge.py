@@ -16,6 +16,7 @@ from forge.executor.engine.judge import (
 )
 from forge.executor.engine.registry import JudgeConfig
 from forge.executor.engine.state import PipelineState, StepState
+from tests.fake_claude import install
 
 
 def _make_state(plan_file="", session_dir=""):
@@ -406,3 +407,18 @@ class TestSaveJudgeFeedback:
         judge_dir = os.path.join(self.tmp, "_judge")
         assert os.path.isfile(os.path.join(judge_dir, "code_attempt_0.json"))
         assert os.path.isfile(os.path.join(judge_dir, "code_attempt_1.json"))
+
+
+SKIN_DIR = Path(__file__).resolve().parents[4] / "skins" / "claude-code"
+
+
+def test_spawn_judge_finds_judge_agent_in_plugin(tmp_path, monkeypatch):
+    install(tmp_path, monkeypatch,
+            stdout='{"items": [{"id": "c1", "verdict": "pass", "reason": "done"}]}')
+    monkeypatch.setenv("FORGE_PLUGIN_DIR", str(SKIN_DIR))
+    criteria = [{"id": "c1", "criteria": "Add undo"}]
+
+    verdict = spawn_judge("code", str(tmp_path), criteria, {"checklist": []}, "diff",
+                          agent_name="forge:executor-judge")
+
+    assert verdict.passed, verdict.summary

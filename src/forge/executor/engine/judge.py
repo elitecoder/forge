@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from forge.providers.claude import plugin_dir_args
+
 from .registry import JudgeConfig, Preset
 from .state import PipelineState
 
@@ -256,6 +258,7 @@ def spawn_judge(step_name: str, session_dir: str, criteria: list[dict],
     env.pop("CLAUDECODE", None)
 
     cmd = ["claude", "-p", "--dangerously-skip-permissions", "--model", model, "--max-turns", "20"]
+    cmd += plugin_dir_args()
     if agent_name:
         cmd += ["--agent", agent_name]
 

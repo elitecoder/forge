@@ -13,6 +13,9 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock, call
 
 import forge.executor.driver as pipeline_driver
+from forge.executor.engine.judge import JudgeVerdict
+from forge.executor.engine.registry import JudgeConfig
+from forge.executor.engine.state import PipelineState, StepState
 from forge.executor.driver import (
     discover_plan, execute_command_step,
     dispatch_ai_step, _handle_command_step, _handle_ai_step,
@@ -400,7 +403,7 @@ class TestCodeReviewVerdict:
     def test_clean_verdict(self, mock_dispatch):
         Path(self.tmp, "code-review-verdict.json").write_text('{"verdict": "CLEAN"}')
 
-        result = run_code_review("/cwd", self.tmp)
+        result = run_code_review(self.tmp, self.tmp)
 
         assert result is True
 
@@ -412,7 +415,7 @@ class TestCodeReviewVerdict:
         )
         mock_dispatch.side_effect = [True, True]  # reviewer pass, fixer pass
 
-        result = run_code_review("/cwd", self.tmp)
+        result = run_code_review(self.tmp, self.tmp)
 
         assert result is True
         assert mock_dispatch.call_count == 2
@@ -420,7 +423,7 @@ class TestCodeReviewVerdict:
     @patch("forge.executor.driver.dispatch_ai_step", return_value=True)
     def test_missing_verdict_fails(self, mock_dispatch):
         # No verdict file
-        result = run_code_review("/cwd", self.tmp)
+        result = run_code_review(self.tmp, self.tmp)
 
         assert result is False
 
@@ -535,7 +538,7 @@ class TestDispatchWithJudge:
                 summary="1/1 passed",
             )
 
-            result = dispatch_with_judge("code", "run", "/cwd", self.tmp, config, state)
+            result = dispatch_with_judge("code", "run", self.tmp, self.tmp, config, state)
 
         assert result is True
         assert mock_dispatch.call_count == 1
@@ -578,7 +581,7 @@ class TestDispatchWithJudge:
                 return True
             mock_dispatch.side_effect = write_checklist
 
-            result = dispatch_with_judge("code", "run", "/cwd", self.tmp, config, state)
+            result = dispatch_with_judge("code", "run", self.tmp, self.tmp, config, state)
 
         assert result is True
         assert mock_dispatch.call_count == 2
@@ -596,7 +599,7 @@ class TestDispatchWithJudge:
         state = PipelineState(steps={"code": StepState()}, step_order=["code"])
 
         # No checklist file written -> all retries fail
-        result = dispatch_with_judge("code", "run", "/cwd", self.tmp, config, state)
+        result = dispatch_with_judge("code", "run", self.tmp, self.tmp, config, state)
 
         assert result is False
         assert mock_dispatch.call_count == 2
@@ -616,7 +619,7 @@ class TestCodeReviewWithJudge:
     def test_clean_verdict_skips_judge(self, mock_dispatch):
         Path(self.tmp, "code-review-verdict.json").write_text('{"verdict": "CLEAN"}')
 
-        result = run_code_review("/cwd", self.tmp)
+        result = run_code_review(self.tmp, self.tmp)
 
         assert result is True
         assert mock_dispatch.call_count == 1
@@ -662,7 +665,7 @@ class TestCodeReviewWithJudge:
                 passed=True,
                 items=[{"id": "f-1", "verdict": "pass", "reason": "Fixed"}],
             )
-            result = run_code_review("/cwd", self.tmp)
+            result = run_code_review(self.tmp, self.tmp)
 
         assert result is True
 
@@ -844,7 +847,7 @@ class TestDispatchWithJudgeAgentFails:
         config = JudgeConfig(criteria_source="plan", max_retries=2)
         state = PipelineState(steps={"code": StepState()}, step_order=["code"])
 
-        result = dispatch_with_judge("code", "run", "/cwd", self.tmp, config, state)
+        result = dispatch_with_judge("code", "run", self.tmp, self.tmp, config, state)
 
         assert result is False
         assert mock_dispatch.call_count == 2
@@ -1070,7 +1073,7 @@ class TestRunCodeReviewEdgeCases:
 
     @patch("forge.executor.driver.dispatch_ai_step", return_value=False)
     def test_reviewer_fails_returns_false(self, mock_dispatch):
-        result = run_code_review("/cwd", self.tmp)
+        result = run_code_review(self.tmp, self.tmp)
         assert result is False
         assert mock_dispatch.call_count == 1
 
@@ -1079,7 +1082,7 @@ class TestRunCodeReviewEdgeCases:
         Path(self.tmp, "code-review-verdict.json").write_text(
             '{"verdict": "MAYBE_ISSUES"}'
         )
-        result = run_code_review("/cwd", self.tmp)
+        result = run_code_review(self.tmp, self.tmp)
         assert result is False
 
     @patch("forge.executor.driver.pipeline_ops.load_preset_for_state", side_effect=Exception("boom"))
@@ -1094,7 +1097,7 @@ class TestRunCodeReviewEdgeCases:
         mock_dispatch.side_effect = [True, True]  # reviewer, fixer
         mock_state.return_value = MagicMock()
 
-        result = run_code_review("/cwd", self.tmp)
+        result = run_code_review(self.tmp, self.tmp)
         assert result is True
 
     @patch("forge.executor.driver.pipeline_ops.load_preset_for_state")
@@ -1120,7 +1123,7 @@ class TestRunCodeReviewEdgeCases:
         preset.steps = {"code_review": step_def}
         mock_preset.return_value = preset
 
-        result = run_code_review("/cwd", self.tmp)
+        result = run_code_review(self.tmp, self.tmp)
         assert result is False
 
     @patch("forge.executor.driver.subprocess.run")
@@ -1166,7 +1169,7 @@ class TestRunCodeReviewEdgeCases:
             return True
 
         mock_dispatch.side_effect = dispatch_with_counter
-        result = run_code_review("/cwd", self.tmp)
+        result = run_code_review(self.tmp, self.tmp)
         assert result is True
 
     @patch("forge.executor.driver.subprocess.run")
@@ -1209,7 +1212,7 @@ class TestRunCodeReviewEdgeCases:
             )
             mock_save.return_value = "/tmp/feedback.json"
 
-            result = run_code_review("/cwd", self.tmp)
+            result = run_code_review(self.tmp, self.tmp)
 
         assert result is False
 
@@ -2410,3 +2413,72 @@ class TestPreflightHooks:
             _preflight_hooks()
         out = capsys.readouterr().out
         assert "eslint + prettier ready" in out
+
+
+# ── Judges see work an agent committed ──────────────────────────────────────
+
+
+def _git_repo(path: Path) -> Path:
+    path.mkdir()
+    for cmd in (["init", "-q", "-b", "main"],
+                ["config", "user.email", "t@example.com"],
+                ["config", "user.name", "T"],
+                ["commit", "-q", "--allow-empty", "-m", "init"]):
+        subprocess.run(["git", *cmd], cwd=path, check=True)
+    return path
+
+
+def _commit_feature(repo: Path) -> None:
+    (repo / "feature.py").write_text("FEATURE = True\n")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "feat"], cwd=repo, check=True)
+
+
+class TestJudgesSeeCommittedWork:
+    def test_dispatch_with_judge_diffs_from_step_start(self, tmp_path):
+        repo = _git_repo(tmp_path / "repo")
+        session = tmp_path / "session"
+        session.mkdir()
+
+        def agent(*_args, **_kwargs):
+            _commit_feature(repo)
+            (session / "code-checklist.json").write_text(json.dumps({"checklist": []}))
+            return True
+
+        verdict = JudgeVerdict(passed=True, items=[{"id": "p", "verdict": "pass"}], summary="")
+        with patch("forge.executor.driver.dispatch_ai_step", side_effect=agent), \
+             patch("forge.executor.engine.judge.spawn_judge", return_value=verdict) as judge:
+            ok = dispatch_with_judge("code", "run", str(repo), str(session),
+                                     JudgeConfig(criteria_source="plan", max_retries=1),
+                                     PipelineState(steps={"code": StepState()}, step_order=["code"]))
+
+        assert ok
+        assert "+FEATURE = True" in judge.call_args.args[4]
+
+    def test_code_review_judge_diffs_from_fix_start(self, tmp_path):
+        repo = _git_repo(tmp_path / "repo")
+        session = tmp_path / "session"
+        session.mkdir()
+        (session / "code-review-verdict.json").write_text('{"verdict": "HAS_ISSUES"}')
+        (session / "code_review-checklist.json").write_text(json.dumps(
+            {"checklist": [{"id": "cr-1", "criteria": "Add FEATURE"}]}))
+
+        def agent(_step, phase, *_args, **_kwargs):
+            if phase == "fix":
+                _commit_feature(repo)
+            return True
+
+        step_def = MagicMock()
+        step_def.judge = JudgeConfig(criteria_source="findings", max_retries=1)
+        preset = MagicMock()
+        preset.steps = {"code_review": step_def}
+        verdict = JudgeVerdict(passed=True, items=[{"id": "cr-1", "verdict": "pass"}], summary="")
+        with patch("forge.executor.driver.dispatch_ai_step", side_effect=agent), \
+             patch("forge.executor.driver.pipeline_ops.require_state"), \
+             patch("forge.executor.driver.pipeline_ops.load_preset_for_state", return_value=preset), \
+             patch("forge.executor.driver.pipeline_ops.reset_step"), \
+             patch("forge.executor.engine.judge.spawn_judge", return_value=verdict) as judge:
+            ok = run_code_review(str(repo), str(session))
+
+        assert ok
+        assert "+FEATURE = True" in judge.call_args.args[4]

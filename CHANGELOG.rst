@@ -1,6 +1,32 @@
 Changelog
 =========
 
+0.8.2 (2026-11-08)
+-------------------
+* **Architect step starts**: The plugin's architect agent is now named
+  ``planner-architect``, the name the planner asks for. It was
+  ``planner-forge``, so Claude Code couldn't find it.
+* **Planner retry limit**: A phase that keeps failing now stops the planner
+  after ``max_retries`` failures instead of retrying forever.
+  ``forge plan drive --resume`` gives a failed phase a fresh set of retries.
+  A new run and ``--resume`` now share one phase loop,
+  ``PlannerDriver.drive_phases()``.
+* **Preset skill paths**: A relative ``skill`` path in ``manifest.json`` is now
+  relative to the preset directory, not the directory you run Forge from.
+  The built-in presets' ``code_review`` and ``create_pr`` steps no longer fail
+  with ``Skill file not found``.
+* **Judge loads the plugin**: The judge that checks a step's work now gets
+  ``--plugin-dir`` from ``FORGE_PLUGIN_DIR``, like every other agent, so it
+  finds ``forge:executor-judge``.
+* **Agents can commit their work**: The code step and both judges now compare
+  against the commit the step started from, not ``HEAD``. A code step whose
+  agent commits its own changes no longer fails with
+  ``No code changes produced``, and the judges see committed fixes.
+* **Python 3.15**: ``uv.lock`` now pins ``rpds-py`` 2026.9.1, which ships
+  Python 3.15 wheels. CI runs on Python 3.12 and 3.15, and
+  ``tests/test_dependencies.py`` checks that the locked dependencies install
+  without building from source.
+
 0.8.1 (2026-11-07)
 -------------------
 * **Public release**: First public version at ``github.com/elitecoder/forge``.

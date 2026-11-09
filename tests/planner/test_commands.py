@@ -16,8 +16,10 @@ from forge.planner.commands import (
     cmd_init, cmd_set_context, cmd_status, cmd_next,
     cmd_run, cmd_pass, cmd_fail, cmd_skip, cmd_reset,
     cmd_complete, cmd_kill, cmd_approve, cmd_dispatch,
+    cmd_drive,
     resolve_skill_dir, _load_planner_conventions, _load_enrichment_plugins,
 )
+from forge.providers.protocol import AgentResult
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -382,3 +384,29 @@ class TestCmdInit:
         data = json.loads((tmp_path / "sess" / ".planner-state.json").read_text())
         assert data["preset"] == "my-preset"
         assert str(preset_dir) in data["preset_path"]
+
+
+def test_resume_retries_exhausted_phase_then_stops(session_dir, mgr):
+    phases = {name: PhaseState() for name in PHASE_ORDER}
+    phases["gatekeeper"].status = PhaseStatus.COMPLETE
+    phases["router"].status = PhaseStatus.COMPLETE
+    phases["architects"] = PhaseState(status=PhaseStatus.FAILED, retries=2)
+    mgr.save(PlannerState(session_dir=str(session_dir), repo_dir=str(session_dir),
+                          problem_statement="p", phases=phases))
+    calls = []
+
+    def run_agent(**kwargs):
+        calls.append(kwargs["step_name"])
+        if len(calls) > 20:
+            raise RuntimeError("retry cap not enforced")
+        return AgentResult(exit_code=0, stdout="", transcript_path="", timed_out=False)
+
+    provider = MagicMock()
+    provider.run_agent.side_effect = run_agent
+    args = argparse.Namespace(resume=True, session=str(session_dir), workers=1,
+                              auto_approve=True)
+    with patch("forge.providers.claude.ClaudeProvider", return_value=provider):
+        cmd_drive(args)
+
+    assert calls.count("architect-a") == 2
+    assert mgr.load().phases["architects"].retries == 2

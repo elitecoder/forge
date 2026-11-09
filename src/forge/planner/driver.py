@@ -186,39 +186,15 @@ class PlannerDriver:
         self._install_signal_handlers()
         self._set_driver_pid()
 
-        killed = False
         try:
-            while True:
-                state = self.state_manager.load()
-                if state.killed:
-                    emit(self.session_dir, EventType.PLANNER_KILLED, "planner",
-                         preset=self.preset, error=state.kill_reason or "")
-                    _log_activity(self.session_dir,
-                                  f"Stopped: killed ({state.kill_reason or 'no reason'})")
-                    killed = True
-                    break
-                phase = state.next_runnable()
-                if phase is None:
-                    break
-                self._dispatch_phase(phase, state)
-
-                # After gatekeeper: spec gate + complexity routing
-                if phase == "gatekeeper":
-                    state = self.state_manager.load()
-                    gk_ps = state.phases.get("gatekeeper")
-                    if gk_ps and gk_ps.status == PhaseStatus.COMPLETE:
-                        if not self.auto_approve and self._verdict_blocks():
-                            continue
-                        self._apply_complexity_routing()
-
-                # After refiners in lite mode: promote refined-a → final-plan
-                if phase == "refiners":
-                    state = self.state_manager.load()
-                    rs = state.phases.get("refiners")
-                    if rs and rs.status == PhaseStatus.COMPLETE and state.pipeline_mode == "lite":
-                        self._promote_refined_to_final()
+            killed = self.drive_phases()
         finally:
             self._clear_driver_pid()
+
+        if killed:
+            state = self.state_manager.load()
+            emit(self.session_dir, EventType.PLANNER_KILLED, "planner",
+                 preset=self.preset, error=state.kill_reason or "")
 
         plan_path = Path(self.session_dir) / "final-plan.md"
         if killed or not plan_path.is_file():
@@ -229,6 +205,38 @@ class PlannerDriver:
         emit(self.session_dir, EventType.PLANNER_COMPLETED, "planner",
              preset=self.preset)
         return plan_path
+
+    def drive_phases(self) -> bool:
+        """Run phases until done, killed, or a phase uses up its retries.
+
+        Returns True when the session was killed.
+        """
+        while True:
+            state = self.state_manager.load()
+            if state.killed:
+                _log_activity(self.session_dir,
+                              f"Stopped: killed ({state.kill_reason or 'no reason'})")
+                return True
+            phase = state.next_runnable()
+            if phase is None:
+                return False
+            self._dispatch_phase(phase, state)
+
+            state = self.state_manager.load()
+            ps = state.phases[phase]
+            if ps.status == PhaseStatus.FAILED and ps.retries >= self.max_retries:
+                _log_activity(self.session_dir,
+                              f"Stopped: phase {phase} failed {ps.retries} times")
+                return False
+
+            if phase == "gatekeeper" and ps.status == PhaseStatus.COMPLETE:
+                if not self.auto_approve and self._verdict_blocks():
+                    continue
+                self._apply_complexity_routing()
+
+            if (phase == "refiners" and ps.status == PhaseStatus.COMPLETE
+                    and state.pipeline_mode == "lite"):
+                self._promote_refined_to_final()
 
     def _verdict_blocks(self) -> bool:
         """Check if spec-verdict is BLOCKED. If so, kill pipeline for human review."""

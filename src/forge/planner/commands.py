@@ -448,6 +448,9 @@ def cmd_drive(args):
         def unflag(s: PlannerState) -> None:
             s.killed = False
             s.kill_reason = ""
+            for ps in s.phases.values():
+                if ps.status == PhaseStatus.FAILED:
+                    ps.retries = 0
         mgr.update(unflag)
 
         auto_approve = getattr(args, 'auto_approve', False)
@@ -463,29 +466,7 @@ def cmd_drive(args):
         driver._install_signal_handlers()
         driver._set_driver_pid()
         try:
-            while True:
-                st = driver.state_manager.load()
-                if st.killed:
-                    _log_activity(session_dir, f"Stopped: killed ({st.kill_reason})")
-                    break
-                phase = st.next_runnable()
-                if phase is None:
-                    break
-                driver._dispatch_phase(phase, st)
-
-                if phase == "gatekeeper":
-                    st = driver.state_manager.load()
-                    gk_ps = st.phases.get("gatekeeper")
-                    if gk_ps and gk_ps.status == PhaseStatus.COMPLETE:
-                        if not auto_approve and driver._verdict_blocks():
-                            continue
-                        driver._apply_complexity_routing()
-
-                if phase == "refiners":
-                    st = driver.state_manager.load()
-                    rs = st.phases.get("refiners")
-                    if rs and rs.status == PhaseStatus.COMPLETE and st.pipeline_mode == "lite":
-                        driver._promote_refined_to_final()
+            driver.drive_phases()
         finally:
             driver._clear_driver_pid()
         print(f"Session: {session_dir}")

@@ -1,5 +1,5 @@
 ---
-name: planner-forge
+name: planner-architect
 description: >
   Forgeure designer for the planner plugin. Produces design documents using
   either top-down or bottom-up reasoning as directed. Use when the planner

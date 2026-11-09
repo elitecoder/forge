@@ -488,6 +488,12 @@ def _load_claude_md_for_review() -> str:
     return ""
 
 
+def resolve_skill_path(step: StepDefinition, preset: Preset) -> Path:
+    """Resolve a step's skill path. Relative paths are relative to the preset directory."""
+    path = Path(step.skill.replace("${PRESET_DIR}", str(preset.preset_dir))).expanduser()
+    return path if path.is_absolute() else Path(preset.preset_dir) / path
+
+
 def generate_ai_prompt(step: StepDefinition, state: PipelineState, preset: Preset) -> str:
     """Generate prompt for AI steps by injecting skill content directly."""
     if step.name == "code":
@@ -498,8 +504,7 @@ def generate_ai_prompt(step: StepDefinition, state: PipelineState, preset: Prese
         step_name=step.name, session_dir=state.session_dir, pipeline_cli=PIPELINE_CLI,
     )
 
-    skill_raw = step.skill.replace("${PRESET_DIR}", str(preset.preset_dir))
-    skill_path = Path(skill_raw).expanduser()
+    skill_path = resolve_skill_path(step, preset)
     if not skill_path.is_file():
         raise FileNotFoundError(f"Skill file not found: {skill_path}")
 
@@ -590,8 +595,7 @@ def generate_ai_fix_prompt(step: StepDefinition, state: PipelineState, preset: P
         parts.append(feedback)
 
     if step.skill:
-        skill_raw = step.skill.replace("${PRESET_DIR}", str(preset.preset_dir))
-        skill_path = Path(skill_raw).expanduser()
+        skill_path = resolve_skill_path(step, preset)
         if skill_path.is_file():
             parts.append(f"\n## Reference\n\n{skill_path.read_text()}")
 

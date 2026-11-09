@@ -36,6 +36,12 @@ def _ts() -> str:
     return utc_timestamp()
 
 
+def plugin_dir_args() -> list[str]:
+    """Return the `--plugin-dir` arguments that load Forge's agents and hooks."""
+    plugin_dir = os.environ.get("FORGE_PLUGIN_DIR", "")
+    return ["--plugin-dir", plugin_dir] if plugin_dir else []
+
+
 def _child_env() -> dict[str, str]:
     env = os.environ.copy()
     env.pop("CLAUDECODE", None)
@@ -84,9 +90,7 @@ class ClaudeProvider:
             "--verbose",
             "--output-format", "stream-json",
         ]
-        plugin_dir = os.environ.get("FORGE_PLUGIN_DIR", "")
-        if plugin_dir:
-            cmd += ["--plugin-dir", plugin_dir]
+        cmd += plugin_dir_args()
         if agent_name:
             cmd += ["--agent", agent_name]
         if model:
