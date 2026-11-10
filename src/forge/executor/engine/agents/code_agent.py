@@ -14,7 +14,7 @@ from ..runner import _judge_feedback_section, build_context, PIPELINE_CLI
 from ..state import PipelineState, StepState
 from ..registry import Preset, StepDefinition
 from ..templates import render
-from ..utils import is_bazel_repo
+from ..utils import head_sha, is_bazel_repo
 
 
 @dataclass
@@ -146,10 +146,10 @@ Playwright tests, or integration test files unless the plan explicitly requests 
 """
 
 
-def _has_code_changes(cwd: str) -> bool:
-    """Check if there are tracked or untracked code changes."""
+def _has_code_changes(cwd: str, base: str = "HEAD") -> bool:
+    """Check for changes since `base`, committed or not, and untracked files."""
     tracked = subprocess.run(
-        ["git", "diff", "--stat", "HEAD"],
+        ["git", "diff", "--stat", base],
         capture_output=True, text=True, cwd=cwd,
     )
     if tracked.stdout.strip():
@@ -162,15 +162,18 @@ def _has_code_changes(cwd: str) -> bool:
     return bool(untracked.stdout.strip())
 
 
-def _detect_packages(cwd: str) -> list[str]:
-    """Detect Bazel packages from uncommitted changes in the worktree.
+def _detect_packages(cwd: str, base: str = "HEAD") -> list[str]:
+    """Detect Bazel packages from changes since `base` in the worktree.
 
-    Only considers uncommitted modifications, staged files, and untracked files
-    (i.e. what the code agent actually produced). Does NOT diff against
-    merge-base, which would pick up all historical branch changes and
+    Only considers what the code agent produced: commits since `base`,
+    uncommitted modifications, staged files, and untracked files. Does NOT diff
+    against merge-base, which would pick up all historical branch changes and
     inflate the package list dramatically.
     """
-    files: set[str] = set()
+    files: set[str] = set(subprocess.run(
+        ["git", "diff", "--name-only", base],
+        capture_output=True, text=True, cwd=cwd,
+    ).stdout.splitlines())
 
     # Uncommitted: modified, staged, and untracked
     status = subprocess.run(
@@ -200,7 +203,8 @@ def _detect_packages(cwd: str) -> list[str]:
 
 
 
-def _verify_build(state: PipelineState, preset: Preset, cwd: str, session_dir: str) -> dict:
+def _verify_build(state: PipelineState, preset: Preset, cwd: str, session_dir: str,
+                  base: str = "HEAD") -> dict:
     """Verify the build succeeds. Returns {"passed": bool, "reason": str}."""
     # Build the build command (same logic as generate_prompt)
     ctx = build_context(state, preset)
@@ -217,10 +221,10 @@ def _verify_build(state: PipelineState, preset: Preset, cwd: str, session_dir: s
         ctx["BUILD_TARGETS"] = " ".join(f"//{p}/..." for p in packages)
     elif "{{BUILD_TARGETS}}" in cmd_template:
         # State doesn't have packages yet — detect from working tree
-        detected = _detect_packages(cwd)
+        detected = _detect_packages(cwd, base)
         if detected:
             ctx["BUILD_TARGETS"] = " ".join(f"//{p}/..." for p in detected)
-        elif _has_code_changes(cwd):
+        elif _has_code_changes(cwd, base):
             return {"passed": False, "reason": "Code changes exist but no build targets could be determined"}
         else:
             return {"passed": True, "reason": "No code changes to verify"}
@@ -374,15 +378,15 @@ def _build_code_prior_context(session_dir: str) -> str | None:
     return "\n\n".join(sections)
 
 
-def _generate_checklist(cwd: str) -> dict:
-    """Generate a checklist from git diff summary."""
+def _generate_checklist(cwd: str, base: str = "HEAD") -> dict:
+    """Generate a checklist from the diff since `base`."""
     diff_stat = subprocess.run(
-        ["git", "diff", "--stat", "HEAD"],
+        ["git", "diff", "--stat", base],
         capture_output=True, text=True, cwd=cwd,
     ).stdout.strip()
 
     diff_files = subprocess.run(
-        ["git", "diff", "--name-only", "HEAD"],
+        ["git", "diff", "--name-only", base],
         capture_output=True, text=True, cwd=cwd,
     ).stdout.strip().splitlines()
 
@@ -444,6 +448,7 @@ def run(
         agent_command=agent_command,
     )
 
+    base = head_sha(cwd)
     result = runner.run(
         prompt=prompt,
         model=model,
@@ -455,14 +460,14 @@ def run(
     )
 
     # Verify outcome deterministically
-    if not _has_code_changes(cwd):
+    if not _has_code_changes(cwd, base):
         _report_fail(session_dir, "No code changes produced")
         return CodeAgentOutcome(passed=False, reason="No code changes produced")
 
     # Build verify + fix loop: retry infra flakes, use fix_agent for code errors
     from .fix_agent import run as run_fix_agent
 
-    build_status = _verify_build(state, preset, cwd, session_dir)
+    build_status = _verify_build(state, preset, cwd, session_dir, base)
 
     for fix_attempt in range(MAX_BUILD_FIX_ATTEMPTS):
         if build_status["passed"]:
@@ -473,7 +478,7 @@ def run(
                           f"build: transient failure, retrying in {BUILD_RETRY_DELAY_S}s "
                           f"({fix_attempt + 1}/{MAX_BUILD_FIX_ATTEMPTS})")
             time.sleep(BUILD_RETRY_DELAY_S)
-            build_status = _verify_build(state, preset, cwd, session_dir)
+            build_status = _verify_build(state, preset, cwd, session_dir, base)
             continue
 
         # Code error — use fix_agent
@@ -490,15 +495,15 @@ def run(
             agent_name=agent_name,
         )
         # Re-verify build after fix agent
-        build_status = _verify_build(state, preset, cwd, session_dir)
+        build_status = _verify_build(state, preset, cwd, session_dir, base)
 
     if not build_status["passed"]:
         _report_fail(session_dir, build_status["reason"])
         return CodeAgentOutcome(passed=False, reason=build_status["reason"])
 
-    packages = _detect_packages(cwd)
+    packages = _detect_packages(cwd, base)
 
-    checklist = _generate_checklist(cwd)
+    checklist = _generate_checklist(cwd, base)
     checklist_path = Path(session_dir) / "code-checklist.json"
     checklist_path.write_text(json.dumps(checklist, indent=2))
 

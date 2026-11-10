@@ -9,6 +9,9 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.12", "3.15"]
     steps:
       - uses: actions/checkout@v4
 
@@ -17,13 +20,13 @@ jobs:
           version: "latest"
 
       - name: Set up Python
-        run: uv python install 3.12
+        run: uv python install ${{ matrix.python }}
 
       - name: Install dependencies
-        run: uv sync --extra dev
+        run: uv sync --frozen --extra dev --python ${{ matrix.python }}
 
       - name: Lint
         run: uv run ruff check src/forge/dashboard/ tests/dashboard/
 
       - name: Run tests
-        run: uv run python -m pytest tests/dashboard/ -v --tb=short
+        run: uv run python -m pytest tests/dashboard/ tests/test_dependencies.py -v --tb=short

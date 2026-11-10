@@ -16,6 +16,8 @@ from forge.planner.engine.state import (
     StateManager,
 )
 from forge.providers.protocol import AgentResult
+from forge.providers.claude import ClaudeProvider
+from tests.fake_claude import install
 
 
 def _make_provider() -> MagicMock:
@@ -377,3 +379,55 @@ def test_dispatch_enrichment_without_preset(tmp_path):
     driver._dispatch_enrichment(state)
 
     provider.run_agent.assert_not_called()
+
+
+SKIN_DIR = Path(__file__).resolve().parents[2] / "skins" / "claude-code"
+
+
+def test_architects_start_with_shipped_plugin(tmp_path, monkeypatch):
+    log = install(
+        tmp_path, monkeypatch,
+        script='f=$(grep -o "[^ ]*/design-[ab]\\.md" "$FAKE_CLAUDE_PROMPT" | head -1); '
+               'seq 1 30 | sed "s/^/line /" > "$f"',
+    )
+    monkeypatch.setenv("FORGE_PLUGIN_DIR", str(SKIN_DIR))
+    session_dir = str(tmp_path / "session")
+    driver = PlannerDriver(ClaudeProvider(), session_dir, repo_dir=str(tmp_path), workers=1)
+    driver._init_session("Add undo")
+
+    def complete_prior(s):
+        for phase in ["gatekeeper", "router"]:
+            s.phases[phase].status = PhaseStatus.COMPLETE
+    driver.state_manager.update(complete_prior)
+
+    driver._dispatch_phase("architects", driver.state_manager.load())
+
+    agents = [json.loads(line)["argv"] for line in log.read_text().splitlines()]
+    assert [a[a.index("--agent") + 1] for a in agents] == ["forge:planner-architect"] * 2
+    assert driver.state_manager.load().phases["architects"].status == PhaseStatus.COMPLETE
+
+
+def test_run_stops_when_phase_exhausts_retries(tmp_path):
+    session_dir = str(tmp_path / "exhaust")
+    calls = []
+
+    def run_agent(**kwargs):
+        calls.append(kwargs["step_name"])
+        if len(calls) > 20:
+            raise RuntimeError("retry cap not enforced")
+        if kwargs["step_name"] == "gatekeeper":
+            _write_evidence(session_dir, "gatekeeper")
+        return AgentResult(exit_code=0, stdout="", transcript_path="", timed_out=False)
+
+    provider = _make_provider()
+    provider.run_agent.side_effect = run_agent
+    driver = PlannerDriver(provider, session_dir, max_retries=2, workers=1, auto_approve=True)
+
+    assert driver.run("problem") is None
+
+    architects = driver.state_manager.load().phases["architects"]
+    assert architects.status == PhaseStatus.FAILED
+    assert architects.retries == 2
+    assert calls.count("architect-a") == 2
+    assert "Stopped: phase architects failed 2 times" in (
+        Path(session_dir) / "planner-activity.log").read_text()

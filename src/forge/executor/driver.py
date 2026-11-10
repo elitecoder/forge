@@ -28,7 +28,7 @@ from forge.executor.engine.state import StateManager, PipelineState, StepStatus,
 from forge.executor.engine.registry import load_preset, get_model
 from forge.executor.engine.runner import build_context
 from forge.executor.engine.templates import render
-from forge.executor.engine.utils import SESSIONS_BASE, is_bazel_repo
+from forge.executor.engine.utils import SESSIONS_BASE, head_sha, is_bazel_repo
 from forge.core.session import generate_slug
 
 
@@ -553,6 +553,7 @@ def dispatch_with_judge(step_name: str, phase: str, cwd: str,
     from forge.executor.engine.judge import load_criteria, spawn_judge, save_judge_feedback
 
     criteria = load_criteria(session_dir, step_name, judge_config, state)
+    base = head_sha(cwd)
 
     for attempt in range(judge_config.max_retries):
         ok = dispatch_ai_step(step_name, phase, cwd, attempt=attempt)
@@ -571,7 +572,7 @@ def dispatch_with_judge(step_name: str, phase: str, cwd: str,
             continue
 
         tracked_diff = subprocess.run(
-            ["git", "diff", "HEAD"], capture_output=True, text=True, cwd=cwd,
+            ["git", "diff", base], capture_output=True, text=True, cwd=cwd,
         ).stdout
         untracked_files = subprocess.run(
             ["git", "ls-files", "--others", "--exclude-standard"],
@@ -958,6 +959,7 @@ def run_code_review(cwd: str, session_dir: str) -> bool:
 
     max_retries = judge_config.max_retries if judge_config else 3
     findings = _load_review_findings(session_dir)
+    base = head_sha(cwd)
 
     for attempt in range(max_retries):
         pipeline_ops.reset_step("code_review", no_retry_inc=True)
@@ -976,7 +978,7 @@ def run_code_review(cwd: str, session_dir: str) -> bool:
             return True
 
         diff = subprocess.run(
-            ["git", "diff", "HEAD"], capture_output=True, text=True, cwd=cwd,
+            ["git", "diff", base], capture_output=True, text=True, cwd=cwd,
         ).stdout
 
         judge_verdict = spawn_judge("code_review", session_dir, findings, checklist, diff,

@@ -150,7 +150,7 @@ Step definition:
 | `error_file`, `fix_hints` | Where failure output goes, and what the fix agent is told. |
 | `timeout` | Seconds. Default 600. |
 | `parallel`, `per_package` | Scheduling hints. |
-| `skill`, `subagent_type`, `two_phase` | Prompt template and agent settings for an `ai` step. `two_phase` splits review from fixing. |
+| `skill`, `subagent_type`, `two_phase` | Prompt template and agent settings for an `ai` step. A relative `skill` path is relative to the preset directory. `two_phase` splits review from fixing. |
 | `judge` | `{ criteria_source, max_retries, model }`. Adds a judge loop. `max_retries` defaults to 3; `model` defaults to the preset's `judge` model, then `opus`. |
 | `evidence` | List of evidence rules (below). |
 | `allowed_file_patterns` | Files the step may change. |

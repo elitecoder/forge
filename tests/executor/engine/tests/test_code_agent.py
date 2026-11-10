@@ -21,6 +21,7 @@ from forge.executor.engine.agents.code_agent import (
 from forge.core.runner import AgentRunner, AgentResult
 from forge.executor.engine.registry import StepDefinition, Preset, PipelineDefinition
 from forge.executor.engine.state import PipelineState, StepState
+from tests.fake_claude import install
 
 
 def _make_preset(preset_dir=".", build_command="", bazel_build_command=""):
@@ -539,3 +540,82 @@ class TestPromptSnapshot:
         assert "## Task" in prompt
         assert "## After Implementing" in prompt
 
+
+
+SKIN_DIR = Path(__file__).resolve().parents[4] / "skins" / "claude-code"
+
+
+def _git_repo(path: Path) -> Path:
+    path.mkdir()
+    for cmd in (["init", "-q", "-b", "main"],
+                ["config", "user.email", "t@example.com"],
+                ["config", "user.name", "T"],
+                ["commit", "-q", "--allow-empty", "-m", "init"]):
+        subprocess.run(["git", *cmd], cwd=path, check=True)
+    return path
+
+
+class TestCodeAgentCommitsItsWork:
+    def _run(self, tmp_path, monkeypatch, script, build_command=""):
+        repo = _git_repo(tmp_path / "repo")
+        monkeypatch.chdir(repo)
+        install(tmp_path, monkeypatch, script=script)
+        monkeypatch.setenv("FORGE_PLUGIN_DIR", str(SKIN_DIR))
+        plan = tmp_path / "plan.md"
+        plan.write_text("Add feature.py")
+        session = tmp_path / "session"
+        session.mkdir()
+        state = _make_state(plan_file=str(plan), session_dir=str(session))
+
+        with patch("forge.executor.engine.agents.code_agent._report_pass"), \
+             patch("forge.executor.engine.agents.code_agent._report_fail"), \
+             patch("forge.executor.engine.agents.code_agent.is_bazel_repo", return_value=False):
+            return run(state, _make_preset(tmp_path, build_command=build_command),
+                       cwd=str(repo), session_dir=str(session),
+                       activity_log_path=str(session / "activity.log"),
+                       agent_command="claude", agent_name="forge:executor-code")
+
+    def test_run_passes_when_agent_commits(self, tmp_path, monkeypatch):
+        targets = tmp_path / "targets.txt"
+        outcome = self._run(
+            tmp_path, monkeypatch,
+            script="mkdir 'my pkg' && touch 'my pkg/BUILD.bazel'"
+                   " && echo 'X = 1' > 'my pkg/feature.py'"
+                   " && git add -A && git commit -qm feat",
+            build_command=f"echo {{{{BUILD_TARGETS}}}} > {targets}",
+        )
+
+        assert outcome.passed, outcome.reason
+        assert outcome.checklist["files_modified"] == ["my pkg/BUILD.bazel", "my pkg/feature.py"]
+        assert "my pkg/feature.py" in outcome.checklist["summary"]
+        assert outcome.detected_packages == ["my pkg"]
+        assert targets.read_text().strip() == "//my pkg/..."
+
+    def test_build_check_sees_committed_change_outside_packages(self, tmp_path, monkeypatch):
+        outcome = self._run(
+            tmp_path, monkeypatch,
+            script="echo 'X = 1' >> feature.py && git add -A && git commit -qm feat",
+            build_command="echo {{BUILD_TARGETS}}",
+        )
+
+        assert not outcome.passed
+        assert outcome.reason == "Code changes exist but no build targets could be determined"
+
+    def test_build_retry_sees_committed_change(self, tmp_path, monkeypatch):
+        with patch("forge.executor.engine.agents.code_agent._is_transient_failure",
+                   side_effect=[True, False, False, False, False]), \
+             patch("forge.executor.engine.agents.code_agent.BUILD_RETRY_DELAY_S", 0):
+            outcome = self._run(
+                tmp_path, monkeypatch,
+                script="echo 'X = 1' >> feature.py && git add -A && git commit -qm feat",
+                build_command="echo {{BUILD_TARGETS}}",
+            )
+
+        assert not outcome.passed
+        assert outcome.reason == "Code changes exist but no build targets could be determined"
+
+    def test_run_fails_when_agent_changes_nothing(self, tmp_path, monkeypatch):
+        outcome = self._run(tmp_path, monkeypatch, script="true")
+
+        assert not outcome.passed
+        assert outcome.reason == "No code changes produced"

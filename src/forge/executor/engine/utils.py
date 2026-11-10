@@ -26,6 +26,14 @@ def repo_root() -> str:
 SESSIONS_BASE = _CORE_BASE / "executor"
 
 
+def head_sha(cwd: str) -> str:
+    """Return the commit HEAD points to, so later diffs include commits an agent makes."""
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=cwd,
+    )
+    return result.stdout.strip() if result.returncode == 0 else "HEAD"
+
+
 def current_branch() -> str:
     """Return the current branch name, or short SHA on detached HEAD."""
     try:
